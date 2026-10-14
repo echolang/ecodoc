@@ -126,7 +126,8 @@ public struct Path
             $out->append('/');
         }
         $out->append(str::join($kept, '/'));
-        if ($trailing && $out->ends('/') == false) {
+        // nothing kept: a relative path is `.`, not `/`
+        if ($trailing && $kept->count() > 0) {
             $out->append('/');
         }
         if ($out->empty()) {

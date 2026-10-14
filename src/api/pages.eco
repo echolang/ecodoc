@@ -166,7 +166,7 @@ public struct ApiPages
     /**
      * `07`, `12`: the number of a divider, two digits when it is under 10.
      */
-    private static function number(usize $n) : string
+    internal static function number(usize $n) : string
     {
         if ($n < 10) {
             return "0{$n}";
@@ -269,15 +269,9 @@ public struct ApiPages
 
         // at a glance: the type's example, from its docblock or #[docs::example]
         string $example = ApiPages::example($ref, $t->tools, $t->doc);
-        string $exampleTitle = Field::text($t->tools, 'example');
         if ($example->empty() == false) {
             $out->append('<section class="overview" id="overview"><div class="overview-head"><h2>At a glance</h2><span class="overview-note">Code on the left · what it <span>echoes</span> on the right</span></div>');
-            string $info = 'echo';
-            if ($exampleTitle->empty() == false) {
-                string $file = Path::base($exampleTitle);
-                $info = "echo title=\"{$file}\"";
-            }
-            CodeBlock::render($info, $example, $out);
+            CodeBlock::render(ApiPages::exampleInfo($t->tools), $example, $out);
             $v->toc->push(TocGroup('overview', 'At a glance'));
         }
         string $prose = $t->doc->restWithoutExample;
@@ -301,12 +295,7 @@ public struct ApiPages
         // the sections
         usize $n = 1;
         foreach (Reference::sections($t) as $section) {
-            array<ApiMember> $in = array<ApiMember>();
-            foreach ($t->members as $m) {
-                if ($m->section == $section) {
-                    $in->push($m);
-                }
-            }
+            array<ApiMember> $in = Reference::inSection($t, $section);
             string $id = Slugger::of($section);
             ApiPages::section($ref, $t->qualified, $section, $id, $n, $in, $site, $links, $search, $v, $out);
             $search->add("{$links->url($t->url)}#{$id}", $section, $t->name, 'section', 'section', '', '');
@@ -318,24 +307,7 @@ public struct ApiPages
         }
 
         // related: what it conforms to, then #[docs::see:]
-        array<string> $related = array<string>();
-        foreach (Field::items($t->decl, 'conforms') as $c) {
-            $related->push(Field::text($c, 'name'));
-        }
-        foreach (Field::strings($t->tools, 'see') as $s) {
-            $related->push($s);
-        }
-        array<string> $cards = array<string>();
-        foreach ($related as $r) {
-            string $old = $links->scope;
-            $links->scope = $t->qualified;
-            string? $q = $links->resolve($r);
-            $links->scope = $old;
-            if ($q == null) {
-                continue;
-            }
-            $cards->push($q ?? '');
-        }
+        array<string> $cards = Reference::related($t, $links);
         if ($cards->empty() == false) {
             ApiPages::divider($out, $n, 'related', 'Related');
             $out->append('<div class="related">');
@@ -414,6 +386,39 @@ public struct ApiPages
     }
 
     /**
+     * The fence info for an example: `echo`, with the file name when
+     * `#[docs::example:]` names one.
+     */
+    internal static function exampleInfo(const json::Value& $tools) : string
+    {
+        string $file = Field::text($tools, 'example');
+        if ($file->empty()) {
+            return 'echo';
+        }
+        string $base = Path::base($file);
+        return "echo title=\"{$base}\"";
+    }
+
+    /**
+     * The label of the success (`$ok`) or failure outcome of
+     * `#[docs::outcomes:]`, `Holds a value` / `Holds a failure` unless it names one.
+     */
+    internal static function outcomeLabel(const json::Value& $outcomes, bool $ok) : string
+    {
+        string $key = 'failLabel';
+        string $fallback = 'Holds a failure';
+        if ($ok) {
+            $key = 'okLabel';
+            $fallback = 'Holds a value';
+        }
+        string $label = Field::text($outcomes, $key);
+        if ($label->empty()) {
+            return $fallback;
+        }
+        return $label;
+    }
+
+    /**
      * The example for a type or member: `#[docs::example: "file.eco"]`
      * relative to the library, else the docblock's first ```echo fence.
      *
@@ -421,7 +426,7 @@ public struct ApiPages
      * @param $tools The `#[docs::*]` attributes on the declaration.
      * @param $doc Fallback when no file is named, or the file cannot be read.
      */
-    private static function example(Reference $ref, const json::Value& $tools, const Docblock& $doc) : string
+    internal static function example(Reference $ref, const json::Value& $tools, const Docblock& $doc) : string
     {
         string $file = Field::text($tools, 'example');
         if ($file->empty() == false) {
@@ -522,6 +527,9 @@ public struct ApiPages
         $v->toc->push($group);
     }
 
+    /**
+     * What a member is called in a heading: its name, `constructor`, or `operator +`.
+     */
     private static function memberLabel(ApiMember $m) : string
     {
         if ($m->kind == 'constructor') {
@@ -600,64 +608,7 @@ public struct ApiPages
         } else {
             $out->append('<div class="sig surface">');
         }
-        if ($m->kind == 'case') {
-            $spell->named($m->owner, $out);
-            $out->append('<span class="p">::</span><span class="f">');
-            Html::escapeInto($m->name, $out);
-            $out->append('</span>');
-            array<json::Value> $payload = Field::items($decl, 'payload');
-            if ($payload->empty() == false) {
-                $out->append('<span class="p">(</span>');
-                bool $first = true;
-                foreach ($payload as $p) {
-                    if ($first == false) {
-                        $out->append('<span class="p">,</span> ');
-                    }
-                    $spell->type(Field::get($p, 'type'), $out);
-                    $out->append(' <span class="v">$');
-                    Html::escapeInto(Field::text($p, 'name'), $out);
-                    $out->append('</span>');
-                    $first = false;
-                }
-                $out->append('<span class="p">)</span>');
-            }
-            string $value = Field::text($decl, 'value');
-            if ($value->empty() == false) {
-                $out->append(' <span class="p">=</span> <span class="s">');
-                Html::escapeInto("'{$value}'", $out);
-                $out->append('</span>');
-            }
-        } else if ($m->kind == 'field') {
-            if (Field::flag($decl, 'static', false)) {
-                $out->append('<span class="k">static</span> ');
-            }
-            $spell->type(Field::get($decl, 'type'), $out);
-            $out->append(' <span class="v">$');
-            Html::escapeInto($m->name, $out);
-            $out->append('</span>');
-            string $value = Field::text($decl, 'default_value');
-            if ($value->empty() == false) {
-                $out->append(' <span class="p">=</span> ');
-                Spell::code($value, $out);
-            }
-        } else if ($m->kind == 'constant') {
-            $out->append('<span class="k">const</span> ');
-            string $type = Field::text($decl, 'type');
-            if ($type->empty() == false) {
-                Spell::code($type, $out);
-                $out->append(' ');
-            }
-            $out->append('<span class="n">');
-            Html::escapeInto($m->name, $out);
-            $out->append('</span>');
-            string $value = Field::text($decl, 'value');
-            if ($value->empty() == false) {
-                $out->append(' <span class="p">=</span> ');
-                Spell::code($value, $out);
-            }
-        } else {
-            $spell->signature($decl, $out);
-        }
+        $spell->member($m, $decl, $out);
         $out->append('</div>');
     }
 
@@ -713,19 +664,11 @@ public struct ApiPages
         json::Value $outcomes = Field::get($m->tools, 'outcomes');
         if ($outcomes->isObject()) {
             $out->append('<div class="outcomes"><div><span class="outcome-ok">');
-            string $okLabel = Field::text($outcomes, 'okLabel');
-            if ($okLabel->empty()) {
-                $okLabel = 'Holds a value';
-            }
-            Html::escapeInto($okLabel, $out);
+            Html::escapeInto(ApiPages::outcomeLabel($outcomes, true), $out);
             $out->append('</span><span class="outcome-text">');
             Html::escapeInto(Field::text($outcomes, 'ok'), $out);
             $out->append('</span></div><div><span class="outcome-fail">');
-            string $failLabel = Field::text($outcomes, 'failLabel');
-            if ($failLabel->empty()) {
-                $failLabel = 'Holds a failure';
-            }
-            Html::escapeInto($failLabel, $out);
+            Html::escapeInto(ApiPages::outcomeLabel($outcomes, false), $out);
             $out->append('</span><span class="outcome-text">');
             Html::escapeInto(Field::text($outcomes, 'fail'), $out);
             $out->append('</span></div></div>');
@@ -752,8 +695,7 @@ public struct ApiPages
 
         string $example = ApiPages::example($ref, $m->tools, $m->doc);
         if (Field::has($m->tools, 'example') && $example->empty() == false) {
-            string $file = Path::base(Field::text($m->tools, 'example'));
-            CodeBlock::render("echo title=\"{$file}\"", $example, $out);
+            CodeBlock::render(ApiPages::exampleInfo($m->tools), $example, $out);
         }
         string $rest = ApiPages::markdown($m->doc->rest, $links, $scope, $m->url);
         if ($rest->empty() == false) {

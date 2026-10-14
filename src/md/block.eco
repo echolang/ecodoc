@@ -295,7 +295,14 @@ public struct ListMarker
         } else {
             return $m;
         }
-        if ($after < $line->size() && $line->byte($after) != ch::SPACE) {
+        if ($after < $line->size() && $line->byte($after) != ch::SPACE && $line->byte($after) != ch::TAB) {
+            return $m;
+        }
+        // a tab after the marker is the one space before the content
+        if ($after < $line->size() && $line->byte($after) == ch::TAB) {
+            $m->filled = Lines::blank(str::trim($line->sub($after, $line->size() - $after))) == false;
+            $m->content = $after + 1;
+            $m->found = true;
             return $m;
         }
         usize $spaces = Lines::run($line, $after, ch::SPACE);
@@ -386,7 +393,7 @@ public struct BlockParser
 
                 // setext underline turns the open paragraph into a heading
                 if ($para->empty() == false && (Lines::only($t, ch::EQ, 1) || Lines::only($t, ch::DASH, 1))
-                    && $t->contains(' ') == false) {
+                    && str::rtrim($t)->contains(' ') == false) {
                     Block $h = Block(.heading, $paraLine);
                     $h->level = 2;
                     if ($first == ch::EQ) {
@@ -497,9 +504,15 @@ public struct BlockParser
         if ($space < $rest->size()) {
             $href = $rest->sub(0, $space);
             string $t = str::trim($rest->sub($space + 1, $rest->size() - $space - 1));
-            if ($t->size() >= 2) {
-                $title = $t->sub(1, $t->size() - 2);
+            uint8 $o = $t->byte(0);
+            uint8 $c = $t->byte($t->size() - 1);
+            bool $quoted = $t->size() >= 2 && (($o == ch::QUOTE && $c == ch::QUOTE) || ($o == ch::APOS && $c == ch::APOS)
+                || ($o == ch::LPAREN && $c == ch::RPAREN));
+            // a title is quoted, anything else after the href makes this plain text
+            if ($quoted == false) {
+                return false;
             }
+            $title = $t->sub(1, $t->size() - 2);
         }
         if ($href->starts('<') && $href->ends('>')) {
             $href = $href->sub(1, $href->size() - 2);
@@ -618,7 +631,7 @@ public struct BlockParser
                         break;
                     }
                     $nested = $nested - 1;
-                } else if ($c == $colons && BlockParser::containerName($t)->empty() == false) {
+                } else if ($c >= $colons && BlockParser::containerName($t)->empty() == false) {
                     $nested = $nested + 1;
                 }
             }
@@ -639,7 +652,7 @@ public struct BlockParser
         if ($hashes == 0 || $hashes > 6) {
             return 0;
         }
-        if ($hashes < $t->size() && $t->byte($hashes) != ch::SPACE) {
+        if ($hashes < $t->size() && $t->byte($hashes) != ch::SPACE && $t->byte($hashes) != ch::TAB) {
             return 0;
         }
         return $hashes as int32;
@@ -678,6 +691,12 @@ public struct BlockParser
         usize $open = $h->text->find('{#');
         if ($open >= $h->text->size()) {
             return;
+        }
+        // the last one, an earlier `{#` may sit in a code span
+        usize $later = $h->text->find('{#', $open + 1);
+        while ($later < $h->text->size()) {
+            $open = $later;
+            $later = $h->text->find('{#', $open + 1);
         }
         string $id = $h->text->sub($open + 2, $h->text->size() - $open - 3);
         if ($id->empty() || $id->contains(' ')) {
@@ -779,6 +798,11 @@ public struct BlockParser
             if ($m->found == false || $m->continues($first) == false) {
                 break;
             }
+            // `- - -` and `* * *` are thematic breaks before they are items
+            string $lt = str::ltrim($lines[$i]);
+            if (($lt->byte(0) == ch::DASH || $lt->byte(0) == ch::STAR) && Lines::only($lt, $lt->byte(0), 3)) {
+                break;
+            }
             string $l = $lines[$i];
             array<string> $body = array<string>();
             if ($m->content < $l->size()) {
@@ -802,11 +826,11 @@ public struct BlockParser
                 if ($ind >= $m->content) {
                     string $inner = $next->sub($m->content, $next->size() - $m->content);
                     string $tt = str::trim($inner);
-                    if ($tt->starts('```') || $tt->starts('~~~')) {
-                        $inFence = $inFence == false;
-                    }
                     if ($inFence == false && $body->count() > 1 && $body[$body->count() - 1]->empty()) {
                         $blankInside = true;
+                    }
+                    if ($tt->starts('```') || $tt->starts('~~~')) {
+                        $inFence = $inFence == false;
                     }
                     $body->push($inner);
                     $i = $i + 1;
@@ -865,7 +889,8 @@ public struct BlockParser
             return true;
         }
         // any lone complete tag, as long as it does not cut a paragraph
-        return $canInterrupt && $t->ends('>');
+        string $line = str::rtrim($t);
+        return $canInterrupt && $line->find('>') + 1 == $line->size();
     }
 
     private static function html(const array<string>& $lines, usize $from, int32 $at, array<Block>& $out) : usize

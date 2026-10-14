@@ -150,6 +150,13 @@ public class PageView
     public PagerLink $next = PagerLink();
 
     /**
+     * The page as Markdown, for agents: written next to the HTML at
+     * `Route::markdown($url)`, and named in the head as its alternate.
+     * Empty for a page agents do not get.
+     */
+    public string $markdown = '';
+
+    /**
      * The outline of a Markdown page: each `##` a group, the `###` under it its items.
      */
     public static function outlineOf(const array<Heading>& $headings) : array<TocGroup>

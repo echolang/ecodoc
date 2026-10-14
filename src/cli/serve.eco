@@ -1,6 +1,7 @@
 namespace ecodoc::cli;
 
 use std::io;
+use ecodoc::site::Route;
 use ecodoc::sys::{Path, Sys};
 use ecodoc::text::Percent;
 
@@ -35,7 +36,7 @@ public struct Serve
                 }
                 return Serve::missing($out, false);
             }
-            return Serve::file($out, $inside ?? '', false);
+            return Serve::page($out, $inside ?? '', $req, false);
         });
 
         io::println("ecodoc: serving http://localhost:{$port}{$base} (ctrl-c stops)");
@@ -79,6 +80,18 @@ public struct Serve
     }
 
     /**
+     * What `$req` asked for at `$requested` inside the output: the file, or
+     * its Markdown twin when the `Accept` header prefers Markdown.
+     */
+    public static function page(const string& $root, const string& $requested, http::Request $req, bool $live) : http::Response
+    {
+        string $accept = $req->header('Accept') ?? '';
+        http::Response $r = Serve::file($root, Serve::negotiate($root, $requested, $accept), $live);
+        $r->header('Vary', 'Accept');
+        return $r;
+    }
+
+    /**
      * One file of the output. Directories answer with their `index.html`, a
      * missing file with `404.html`. Live, for `ecodoc dev`, pages get the
      * reload script and nothing is cached.
@@ -86,7 +99,8 @@ public struct Serve
     public static function file(const string& $root, const string& $requested, bool $live) : http::Response
     {
         string $rel = Percent::decode($requested);
-        if ($rel->contains('..')) {
+        // Path::join takes an absolute path as is, so `//etc/passwd` would leave the root
+        if ($rel->contains('..') || $rel->starts('/')) {
             return http::Response::notFound();
         }
         string $path = Path::join($root, $rel);
@@ -114,6 +128,72 @@ public struct Serve
             $file->header('Cache-Control', 'no-store');
         }
         return $file;
+    }
+
+    /**
+     * Whether an `Accept` header asks for Markdown first: `text/markdown`
+     * with a weight above 0 and at least the weight of `text/html`. A
+     * browser's `*\/*` does not count; an agent has to say it.
+     *
+     * ```echo
+     * echo Serve::wantsMarkdown('text/markdown');                        // true
+     * echo Serve::wantsMarkdown('text/html, text/markdown;q=0.9');       // false
+     * echo Serve::wantsMarkdown('text/markdown, text/html;q=0.8');       // true
+     * ```
+     */
+    public static function wantsMarkdown(const string& $accept) : bool
+    {
+        // nearly every request is a browser's, which never names it
+        if (str::lower($accept)->contains('markdown') == false) {
+            return false;
+        }
+        float64 $markdown = -1.0;
+        float64 $html = -1.0;
+        foreach (str::split($accept, ',')->owned() as $range) {
+            array<string> $params = str::split($range, ';')->owned();
+            if ($params->empty()) {
+                continue;
+            }
+            string $type = str::lower(str::trim($params[0]));
+            float64 $q = 1.0;
+            for (usize $i = 1; $i < $params->count(); $i++) {
+                string $p = str::trim($params[$i]);
+                if ($p->starts('q=')) {
+                    $q = str::float($p->sub(2, $p->size() - 2)) ?? 1.0;
+                }
+            }
+            if ($type == 'text/markdown' || $type == 'text/x-markdown') {
+                $markdown = $q;
+            } else if ($type == 'text/html') {
+                $html = $q;
+            }
+        }
+        return $markdown > 0.0 && $markdown >= $html;
+    }
+
+    /**
+     * What to answer `$requested` with: the page's Markdown twin when the
+     * client asked for Markdown and the twin exists, else what was asked for.
+     *
+     * @param $root The output directory.
+     * @param $requested The path inside the site, `guide/cli/` or `guide/cli/index.html`.
+     * @param $accept The request's `Accept` header, empty for none.
+     */
+    public static function negotiate(const string& $root, const string& $requested, const string& $accept) : string
+    {
+        if (Serve::wantsMarkdown($accept) == false) {
+            return $requested->clone();
+        }
+        // the twin stays encoded, the way file() takes it; only the check decodes
+        string $twin = Route::markdown(Route::link($requested));
+        if ($twin->empty()) {
+            return $requested->clone();
+        }
+        string $rel = Percent::decode($twin);
+        if ($rel->contains('..') || $rel->starts('/') || Sys::isFile(Path::join($root, $rel)) == false) {
+            return $requested->clone();
+        }
+        return $twin;
     }
 
     /**

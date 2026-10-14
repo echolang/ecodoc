@@ -39,6 +39,10 @@ inputs:
     description: Path the site is served under, overriding `#[docs::base:]`. `/<repo>/` for a project site on GitHub Pages.
     required: false
     default: ''
+  url:
+    description: Where the site is published, overriding `#[docs::url:]`. Makes the links in llms.txt, the Markdown pages and the skill absolute.
+    required: false
+    default: ''
   strict:
     description: Fail on a dead link or an unresolved symbol
     required: false
@@ -86,6 +90,7 @@ runs:
         DOCS: ${{ inputs.docs }}
         OUT: ${{ inputs.out }}
         BASE: ${{ inputs.base }}
+        URL: ${{ inputs.url }}
         STRICT: ${{ inputs.strict }}
       run: |
         set -u
@@ -93,6 +98,9 @@ runs:
         args=(build --docs "${DOCS}" --out "${out}")
         if [ -n "${BASE}" ]; then
             args+=(--base "${BASE}")
+        fi
+        if [ -n "${URL}" ]; then
+            args+=(--url "${URL}")
         fi
         if [ "${STRICT}" = "true" ]; then
             args+=(--strict)

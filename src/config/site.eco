@@ -55,6 +55,65 @@ public struct ApiConfig
 }
 
 /**
+ * What `#[docs::llms: {...}]` asks for: the Markdown twins, `llms.txt` and
+ * the agent skill. All on unless the manifest says
+ * `#[docs::llms: false]`.
+ */
+public struct LlmsConfig
+{
+    /**
+     * Whether anything is written for agents at all.
+     */
+    public bool $enabled = true;
+
+    /**
+     * URL prefixes left out of everything for agents: `/guide/internal/`.
+     */
+    public array<string> $exclude = array<string>();
+
+    /**
+     * A paragraph for agents, written into `llms.txt` and the skill.
+     */
+    public string $intro = '';
+
+    /**
+     * Write the agent skill under `skill/`.
+     */
+    public bool $skill = true;
+
+    /**
+     * The skill's name. Empty means one made from the title.
+     */
+    public string $skillName = '';
+
+    /**
+     * The skill's description, when the made-up one does not say enough.
+     */
+    public string $skillDescription = '';
+
+    /**
+     * Also pack the skill as a `.zip`, the form claude.ai uploads.
+     */
+    public bool $zip = true;
+
+    /**
+     * Whether the page at `$url` is offered to agents: no excluded prefix starts it.
+     */
+    public const function covers(const string& $url) : bool
+    {
+        if ($this->enabled == false) {
+            return false;
+        }
+        foreach ($this->exclude as $prefix) {
+            if ($url->starts($prefix)) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
+/**
  * The site, as `docs/docs.eco` describes it. The manifest is Echo: tool
  * attributes in the `docs` namespace, read through `echoc -p manifest` so the
  * compiler owns the syntax and ecodoc only reads values.
@@ -101,6 +160,18 @@ public class Site
      * Always starts and ends with `/`.
      */
     public string $base = '/';
+
+    /**
+     * Where the site is published, `https://echolang.github.io/ecodoc`, base
+     * included and without a trailing slash. Empty when the manifest has no
+     * `url`. It makes the links agents read absolute.
+     */
+    public string $url = '';
+
+    /**
+     * Whether the manifest names a `base`. Without one, the path of `url` is the base.
+     */
+    public bool $baseStated = false;
 
     /**
      * The repository URL, for the icon in the top bar.
@@ -154,6 +225,11 @@ public class Site
     public ApiConfig $api = ApiConfig();
 
     /**
+     * What is written for agents. On by default.
+     */
+    public LlmsConfig $llms = LlmsConfig();
+
+    /**
      * Every `docs::` attribute as written, for anything a theme wants that ecodoc does not model.
      */
     public json::Value $raw = json::object();
@@ -203,7 +279,9 @@ public class Site
         string $base = Field::text($d, 'base');
         if ($base->empty() == false) {
             $s->base = Route::base($base);
+            $s->baseStated = true;
         }
+        $s->publish(Field::text($d, 'url'));
 
         json::Value $footer = Field::get($d, 'footer');
         if ($footer->isStr()) {
@@ -265,7 +343,79 @@ public class Site
                 $s->api->title = $apiTitle;
             }
         }
+        Site::readLlms(Field::get($d, 'llms'), $s->llms);
         return $s;
+    }
+
+    /**
+     * `#[docs::llms:]`: missing or `true` keeps the defaults, `false` turns
+     * everything off, an object tunes it.
+     */
+    private static function readLlms(const json::Value& $v, LlmsConfig& $l) : void
+    {
+        if ($v->isObject() == false) {
+            $l->enabled = $v->asBool() ?? true;
+            return;
+        }
+        foreach (Field::strings($v, 'exclude') as $prefix) {
+            $l->exclude->push(Route::link($prefix));
+        }
+        $l->intro = Field::text($v, 'intro');
+        json::Value $skill = Field::get($v, 'skill');
+        if ($skill->isObject()) {
+            $l->skillName = Field::text($skill, 'name');
+            $l->skillDescription = Field::text($skill, 'description');
+            $l->zip = Field::flag($skill, 'zip', true);
+        } else {
+            $l->skill = $skill->asBool() ?? true;
+        }
+    }
+
+    /**
+     * Set where the site is published. A site published under a path is
+     * served under it, unless the manifest named a `base` of its own.
+     */
+    public function publish(const string& $raw) : void
+    {
+        $this->url = Site::origin($raw);
+        if ($this->baseStated) {
+            return;
+        }
+        // a url at the domain root resets a base an earlier url implied
+        $this->base = Route::base(Site::urlPath($this->url));
+    }
+
+    /**
+     * A published URL in the form `$url` keeps it: trimmed, no trailing slash.
+     */
+    public static function origin(const string& $raw) : string
+    {
+        string $url = str::trim($raw);
+        while ($url->ends('/')) {
+            $url = $url->sub(0, $url->size() - 1);
+        }
+        return $url;
+    }
+
+    /**
+     * The path of a URL after its host, `/ecodoc` for
+     * `https://echolang.github.io/ecodoc`. Empty for none.
+     */
+    public static function urlPath(const string& $url) : string
+    {
+        usize $scheme = $url->find('://');
+        if ($scheme >= $url->size()) {
+            return '';
+        }
+        usize $slash = $url->find('/', $scheme + 3);
+        if ($slash >= $url->size()) {
+            return '';
+        }
+        string $path = $url->sub($slash, $url->size() - $slash);
+        if ($path == '/') {
+            return '';
+        }
+        return $path;
     }
 
     /**

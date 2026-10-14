@@ -58,7 +58,9 @@ public struct Spans
     {
         $this->lines->push($this->line);
         $this->line = '';
-        return $this->lines;
+        array<string> $out = $this->lines;
+        $this->lines = array<string>();
+        return $out;
     }
 }
 

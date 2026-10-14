@@ -1,8 +1,8 @@
 namespace ecodoc::site;
 
 use std::io;
-use ecodoc::config::Field;
-use ecodoc::md::{BlockKind, Document, FrontSplit, Frontmatter, Heading, Inline, Renderer};
+use ecodoc::config::{Field, LlmsConfig, Site};
+use ecodoc::md::{BlockKind, Document, FrontSplit, Frontmatter, Heading, Inline, Markdown, Renderer};
 use ecodoc::sys::Path;
 use ecodoc::text::Html;
 
@@ -141,6 +141,57 @@ public class Page
         if ($this->description->empty()) {
             $this->description = Page::firstParagraph($this->doc, $links);
         }
+    }
+
+    /**
+     * The page as Markdown for agents: its `# title`, the `description:` it
+     * was given as a quote under it, then the content with every link
+     * resolved to a twin. A home page tells its hero and features first.
+     *
+     * Call after `render()`.
+     */
+    public function markdown(Links $links, const Site& $site) : string
+    {
+        $links->page = $this->rel;
+        $links->scope = '';
+        if ($this->layout == PageLayout::home) {
+            return Home::markdown($this, $links, $site);
+        }
+        return $this->article($links);
+    }
+
+    private function article(Links $links) : string
+    {
+        Markdown $m = Markdown($links);
+        array<string> $parts = $m->parts($this->doc);
+        string $out = '';
+        usize $from = 0;
+        // the title the content opens with, else the one the page was given
+        if ($parts->empty() == false && $this->doc->blocks->empty() == false
+            && $this->doc->blocks[0]->kind == BlockKind::heading && $this->doc->blocks[0]->level == 1) {
+            $out->append($parts[0]);
+            $from = 1;
+        } else {
+            $out->append("# {$this->title}");
+        }
+        if (Field::has($this->front, 'description')) {
+            $out->append("\n\n> {$this->description}");
+        }
+        for (usize $i = $from; $i < $parts->count(); $i++) {
+            $out->append("\n\n");
+            $out->append($parts[$i]);
+        }
+        $out->append("\n");
+        return $out;
+    }
+
+    /**
+     * Whether agents get this page: `llms: false` in its frontmatter or an
+     * excluded prefix in the manifest keeps it from them.
+     */
+    public const function forAgents(const LlmsConfig& $llms) : bool
+    {
+        return Field::flag($this->front, 'llms', true) && $llms->covers($this->url);
     }
 
     /**

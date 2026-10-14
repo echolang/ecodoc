@@ -1,0 +1,443 @@
+namespace ecodoc::api;
+
+use ecodoc::config::{Field, Site};
+use ecodoc::md::{Document, Markdown, Relink};
+use ecodoc::site::{Links, SearchIndex};
+use ecodoc::text::Lines;
+
+/**
+ * The reference as Markdown, written for an agent instead of a browser: a
+ * type's page is its interface definition.
+ *
+ * ```echo
+ * string $md = ApiMarkdown::type($ref, $t, $links);
+ * // # `json::Value`
+ * //
+ * // ```echo
+ * // namespace json;
+ * //
+ * // // A JSON value of any kind.
+ * // class Value
+ * // {
+ * //     // The value under `$key`, or nothing.
+ * //     const function get(const string& $key) : Value?;
+ * // }
+ * // ```
+ * ```
+ *
+ * The HTML page spends its room on headings, pills and source links. An
+ * agent needs the declarations and what the docblocks say about them, so
+ * that is all a twin holds: one line of Echo per declaration, type names
+ * qualified where a link would have said where they live, the docblock as
+ * comments above it, and the `#[docs::*]` attributes as `@valid`,
+ * `@outcome`, `@since` tags. The index adds `## Signatures`, the whole
+ * library with one-line summaries, for the agent that wants it in one read.
+ */
+public struct ApiMarkdown
+{
+    /**
+     * The twin of the reference's index: every namespace with its types and
+     * their summaries, then the signature digest of the whole library.
+     */
+    public static function index(Reference $ref, const Site& $site, Links $links) : string
+    {
+        string $out = "# {$ref->config->title}";
+        if ($site->description->empty() == false) {
+            $out->append("\n\n> {$site->description}");
+        }
+        string $version = '';
+        if ($ref->version->empty() == false) {
+            $version = " v{$ref->version}";
+        }
+        $out->append("\n\nThe reference of `{$ref->library}`{$version}: {$ref->types->count()} types. Every page below has the full docs of one type or namespace; `## Signatures` at the end lists every declaration in one place.");
+
+        foreach ($ref->tree() as $ns) {
+            if ($ns->types->empty() && $ns->hasPage() == false) {
+                continue;
+            }
+            string $title = $ns->title();
+            if ($ns->hasPage()) {
+                string $href = $links->twin($ns->url);
+                $out->append("\n\n## [`{$title}`]({$href})");
+            } else {
+                $out->append("\n\n## `{$title}`");
+            }
+            if ($ns->types->empty() == false) {
+                $out->append("\n");
+                ApiMarkdown::typeList($ns->types, $links, $out);
+            }
+        }
+
+        $out->append("\n\n## Signatures\n\n");
+        $out->append(ApiMarkdown::digest($ref, $links));
+        $out->append("\n");
+        return $out;
+    }
+
+    /**
+     * The twin of one type, written as an interface definition: the type
+     * and every member as one declaration each, the docblocks as comments
+     * above them, grouped the way the page groups them. A header file with
+     * its docs, and nothing an agent has to read past.
+     */
+    public static function type(Reference $ref, ApiType $t, Links $links) : string
+    {
+        Spell $spell = ApiMarkdown::speller($links, $t->ns);
+
+        string $code = '';
+        if ($t->ns->empty() == false) {
+            $code->append("namespace {$t->ns};\n\n");
+        }
+        string $notes = ApiMarkdown::notes($ref, $t->doc, $t->tools, $links, $t->qualified, $t->url);
+        string $see = ApiMarkdown::related($t, $links);
+        if ($see->empty() == false) {
+            if ($notes->empty() == false) {
+                $notes->append("\n\n");
+            }
+            $notes->append("See also: {$see}");
+        }
+        $code->append(ApiMarkdown::commented($notes, ''));
+        $code->append("{$t->kind} {$t->title()}");
+        $code->append("\n{");
+
+        // sections() only names the ones that have members
+        array<string> $sections = Reference::sections($t);
+        foreach ($sections as $section) {
+            if ($sections->count() > 1) {
+                $code->append("\n    // --- {$section} ---\n");
+            }
+            foreach (Reference::inSection($t, $section) as $m) {
+                $code->append("\n");
+                ApiMarkdown::entry($ref, $m, $t->qualified, $links, $spell, '    ', $code);
+            }
+        }
+        $code->append("}\n");
+
+        if ($t->extensions->empty() == false) {
+            $code->append("\n// --- Extensions: free functions declared in their own namespace, taking this type first ---\n");
+            foreach ($t->extensions as $m) {
+                $code->append("\n");
+                ApiMarkdown::entry($ref, $m, $t->qualified, $links, $spell, '', $code);
+            }
+        }
+
+        string $out = "# `{$t->qualified}`\n\n";
+        $out->append(Markdown::fence('echo', str::rtrim($code)));
+        $out->append("\n");
+        return $out;
+    }
+
+    /**
+     * The twin of one namespace: the namespaces below it and its types as
+     * links, then its functions, operators and constants as declarations
+     * with their docs.
+     */
+    public static function space(Reference $ref, ApiNamespace $ns, Links $links) : string
+    {
+        Spell $spell = ApiMarkdown::speller($links, $ns->name);
+
+        string $out = "# `{$ns->title()}`";
+        if ($ns->children->empty() == false) {
+            $out->append("\n\n## Namespaces\n");
+            foreach ($ns->children as $child) {
+                string $href = $links->twin($child->url);
+                $out->append("\n- [`{$child->title()}`]({$href}): {$child->tally()}");
+            }
+        }
+        if ($ns->types->empty() == false) {
+            $out->append("\n\n## Types\n");
+            ApiMarkdown::typeList($ns->types, $links, $out);
+        }
+        array<ApiMember> $loose = $ns->loose();
+        if ($loose->empty() == false) {
+            string $code = '';
+            if ($ns->name->empty() == false) {
+                $code->append("namespace {$ns->name};\n");
+            }
+            foreach ($loose as $m) {
+                // the global namespace has no `namespace` line to keep the first entry from
+                if ($code->empty() == false) {
+                    $code->append("\n");
+                }
+                ApiMarkdown::entry($ref, $m, $ns->name, $links, $spell, '', $code);
+            }
+            $out->append("\n\n## Declarations\n\n");
+            $out->append(Markdown::fence('echo', str::rtrim($code)));
+        }
+        $out->append("\n");
+        return $out;
+    }
+
+    /**
+     * The whole library as declarations, one fenced block per namespace,
+     * the way a header file reads: each type with its members as one line
+     * each and a comment with the summary. The cheapest way for an agent to
+     * know every call it can make.
+     */
+    private static function digest(Reference $ref, Links $links) : string
+    {
+        array<string> $blocks = array<string>();
+        foreach ($ref->tree() as $ns) {
+            array<ApiMember> $loose = $ns->loose();
+            if ($ns->types->empty() && $loose->empty()) {
+                continue;
+            }
+            Spell $spell = ApiMarkdown::speller($links, $ns->name);
+            array<string> $parts = array<string>();
+            if ($ns->name->empty() == false) {
+                $parts->push("namespace {$ns->name};");
+            }
+            foreach ($ns->types as $t) {
+                string $type = ApiMarkdown::comment($ref->summary($t->qualified), '');
+                $type->append("{$t->kind} {$t->title()}");
+                $type->append("\n{\n");
+                ApiMarkdown::summarized(ApiMarkdown::bodyOrder($t->members), $spell, $links, '    ', $type);
+                $type->append('}');
+                $parts->push($type);
+            }
+            if ($loose->empty() == false) {
+                string $free = '';
+                ApiMarkdown::summarized($loose, $spell, $links, '', $free);
+                $parts->push(str::rtrim($free));
+            }
+            string $body = str::join($parts, "\n\n");
+            $blocks->push(Markdown::fence('echo', $body));
+        }
+        return str::join($blocks, "\n\n");
+    }
+
+    /**
+     * Each member as the digest lists it: its summary once, above the first
+     * overload, then one declaration per overload.
+     */
+    private static function summarized(const array<ApiMember>& $members, const Spell& $spell, Links $links, const string& $indent, string& $out) : void
+    {
+        foreach ($members as $m) {
+            $out->append(ApiMarkdown::comment(Reference::plain($m->doc->summary, $links), $indent));
+            foreach ($m->decls as $d) {
+                $out->append($indent);
+                $out->append($spell->line($m, $d));
+                $out->append(";\n");
+            }
+        }
+    }
+
+    /**
+     * Members in the order a type body is written: cases, fields and
+     * constants first, then constructors, then everything callable.
+     */
+    private static function bodyOrder(const array<ApiMember>& $members) : array<ApiMember>
+    {
+        array<ApiMember> $state = array<ApiMember>();
+        array<ApiMember> $ctors = array<ApiMember>();
+        array<ApiMember> $rest = array<ApiMember>();
+        foreach ($members as $m) {
+            if ($m->kind == 'case' || $m->kind == 'field' || $m->kind == 'constant') {
+                $state->push($m);
+            } else if ($m->kind == 'constructor') {
+                $ctors->push($m);
+            } else {
+                $rest->push($m);
+            }
+        }
+        $state->extend($ctors);
+        $state->extend($rest);
+        return $state;
+    }
+
+    /**
+     * Spells declarations as a twin writes them: plain Echo, `case none` and
+     * `constructor(...)` as a type body declares them, type names qualified
+     * unless they live in `$within`.
+     */
+    private static function speller(Links $links, const string& $within) : Spell
+    {
+        Spell $spell = Spell($links);
+        $spell->qualify = true;
+        $spell->declared = true;
+        $spell->within = $within;
+        return $spell;
+    }
+
+    /**
+     * `// text`, clipped to one short line, then a newline. Nothing for no text.
+     */
+    private static function comment(const string& $text, const string& $indent) : string
+    {
+        if ($text->empty()) {
+            return '';
+        }
+        string $clipped = SearchIndex::clip($text, 120);
+        return "{$indent}// {$clipped}\n";
+    }
+
+    private static function typeList(const array<ApiType>& $types, Links $links, string& $out) : void
+    {
+        foreach ($types as $t) {
+            string $href = $links->twin($t->url);
+            string $title = $t->title();
+            $out->append("\n- [`{$title}`]({$href}) ({$t->kind})");
+            string $text = ApiMarkdown::brief($t->doc->summary, $links, $t->qualified, $t->url);
+            if ($text->empty() == false) {
+                $out->append(": {$text}");
+            }
+        }
+    }
+
+    /**
+     * A summary on one line, for a list item: the prose with its line breaks as spaces.
+     */
+    private static function brief(const string& $md, Links $links, const string& $scope, const string& $page) : string
+    {
+        return Lines::oneLine(ApiMarkdown::prose($md, $links, $scope, $page, false));
+    }
+
+    /**
+     * One member: its docs as comments, then a declaration per overload.
+     * An overload with a docblock of its own gets it above its line.
+     */
+    private static function entry(Reference $ref, ApiMember $m, const string& $scope, Links $links, const Spell& $spell, const string& $indent, string& $out) : void
+    {
+        string $notes = ApiMarkdown::notes($ref, $m->doc, $m->tools, $links, $scope, $m->url);
+        $out->append(ApiMarkdown::commented($notes, $indent));
+        string $firstDoc = Field::text($m->decls[0], 'doc');
+        for (usize $i = 0; $i < $m->decls->count(); $i++) {
+            json::Value $decl = $m->decls[$i];
+            string $own = Field::text($decl, 'doc');
+            if ($i > 0 && $own->empty() == false && $own != $firstDoc) {
+                Docblock $d = Docblock::parse($own);
+                $out->append(ApiMarkdown::commented(ApiMarkdown::prose($d->text, $links, $scope, $m->url, true), $indent));
+            }
+            $out->append($indent);
+            $out->append($spell->line($m, $decl));
+            $out->append(";\n");
+        }
+    }
+
+    /**
+     * What a docblock and the `#[docs::*]` attributes say, as the text of a
+     * comment: the prose, an example file, then `@param`, `@return`,
+     * `@valid`, `@outcome`, `@since` and `@deprecated`, one per line.
+     */
+    private static function notes(Reference $ref, const Docblock& $doc, const json::Value& $tools, Links $links, const string& $scope, const string& $page) : string
+    {
+        array<string> $parts = array<string>();
+        string $prose = ApiMarkdown::prose($doc->text, $links, $scope, $page, true);
+        if ($prose->empty() == false) {
+            $parts->push($prose);
+        }
+        if (Field::has($tools, 'example')) {
+            string $example = ApiPages::example($ref, $tools, $doc);
+            if ($example->empty() == false) {
+                $parts->push(Markdown::fence(ApiPages::exampleInfo($tools), $example));
+            }
+        }
+
+        array<string> $tags = array<string>();
+        foreach ($doc->params as $p) {
+            string $text = ApiMarkdown::inline($p->text, $links, $scope, $page);
+            $tags->push("@param {$p->name} {$text}");
+        }
+        if ($doc->returns->empty() == false) {
+            string $text = ApiMarkdown::inline($doc->returns, $links, $scope, $page);
+            $tags->push("@return {$text}");
+        }
+        string $valid = Field::text($tools, 'valid');
+        if ($valid == 'always') {
+            $tags->push('@valid always');
+        } else if ($valid->empty() == false) {
+            $tags->push("@valid only when `{$valid}`");
+        }
+        json::Value $outcomes = Field::get($tools, 'outcomes');
+        if ($outcomes->isObject()) {
+            string $okLabel = ApiPages::outcomeLabel($outcomes, true);
+            string $failLabel = ApiPages::outcomeLabel($outcomes, false);
+            string $ok = Field::text($outcomes, 'ok');
+            string $fail = Field::text($outcomes, 'fail');
+            $tags->push("@outcome {$okLabel}: {$ok}");
+            $tags->push("@outcome {$failLabel}: {$fail}");
+        }
+        string $since = Field::text($tools, 'since');
+        if ($since->empty() == false) {
+            $tags->push("@since {$since}");
+        }
+        if (Field::has($tools, 'deprecated')) {
+            string $why = Field::text($tools, 'deprecated');
+            $tags->push(str::rtrim("@deprecated {$why}"));
+        }
+        if ($tags->empty() == false) {
+            $parts->push(str::join($tags, "\n"));
+        }
+        return str::join($parts, "\n\n");
+    }
+
+    /**
+     * `$text` as `//` comment lines under `$indent`, each line ended. Nothing for no text.
+     */
+    private static function commented(const string& $text, const string& $indent) : string
+    {
+        if ($text->empty()) {
+            return '';
+        }
+        string $out = '';
+        foreach (Lines::split($text) as $line) {
+            if (Lines::blank($line)) {
+                $out->append("{$indent}//\n");
+            } else {
+                $out->append("{$indent}// {$line}\n");
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * What a type conforms to and what `#[docs::see:]` names, resolved, as
+     * qualified names in backticks.
+     */
+    private static function related(ApiType $t, Links $links) : string
+    {
+        array<string> $out = array<string>();
+        foreach (Reference::related($t, $links) as $q) {
+            $out->push("`{$q}`");
+        }
+        return str::join($out, ', ');
+    }
+
+    /**
+     * Docblock Markdown as twin Markdown, against `$scope` so a bare `get()`
+     * means the type's own. Scope and page are put back afterwards.
+     */
+    private static function prose(const string& $md, Links $links, const string& $scope, const string& $page, bool $bare) : string
+    {
+        if (str::trim($md)->empty()) {
+            return '';
+        }
+        string $oldScope = $links->scope;
+        string $oldPage = $links->page;
+        $links->scope = $scope;
+        $links->page = $page;
+        Markdown $m = Markdown($links);
+        $m->bare = $bare;
+        string $out = str::trim($m->document(Document::parse($md, 1)));
+        $links->scope = $oldScope;
+        $links->page = $oldPage;
+        return $out;
+    }
+
+    /**
+     * One line of docblock Markdown, a `@param` or `@return`, links resolved.
+     */
+    private static function inline(const string& $md, Links $links, const string& $scope, const string& $page) : string
+    {
+        string $oldScope = $links->scope;
+        string $oldPage = $links->page;
+        $links->scope = $scope;
+        $links->page = $page;
+        Relink $r = Relink(Document(), $links);
+        $r->bare = true;
+        string $out = $r->text($md);
+        $links->scope = $oldScope;
+        $links->page = $oldPage;
+        return $out;
+    }
+}

@@ -1,0 +1,102 @@
+use ecodoc::sys::Zip;
+
+function zipU16(const string& $b, usize $at) : uint32
+{
+    return ($b->byte($at) as uint32) | (($b->byte($at + 1) as uint32) << 8);
+}
+
+function zipU32(const string& $b, usize $at) : uint32
+{
+    return zipU16($b, $at) | (zipU16($b, $at + 2) << 16);
+}
+
+#[group: "zip"]
+test zip_crc32_known_values
+{
+    assert(Zip::crc32('') == 0);
+    assert(Zip::crc32('a') == 3904355907);
+    assert(Zip::crc32('123456789') == 3421780262);
+    assert(Zip::crc32('The quick brown fox jumps over the lazy dog') == 1095738169);
+    assert(Zip::crc32('café') == 2561491637);
+    string $high = '';
+    $high->push(255);
+    $high->push(0);
+    $high->push(128);
+    assert(Zip::crc32($high) == 2892066527);
+}
+
+#[group: "zip"]
+test zip_empty_archive_is_only_the_end_record
+{
+    Zip $z = Zip();
+    string $b = $z->bytes();
+    assert($b->size() == 22);
+    assert(zipU32($b, 0) == 0x06054b50);
+    assert(zipU16($b, 8) == 0);
+    assert(zipU16($b, 10) == 0);
+    assert(zipU32($b, 12) == 0);
+    assert(zipU32($b, 16) == 0);
+}
+
+#[group: "zip"]
+test zip_layout_of_two_entries
+{
+    Zip $z = Zip();
+    $z->add('a.md', 'hello');
+    $z->add('dir/é.md', '');
+    string $b = $z->bytes();
+
+    // local header, name, data for each entry
+    usize $first = 30 + 4 + 5;
+    usize $second = 30 + 9;
+    usize $body = $first + $second;
+    usize $central = 46 + 4 + 46 + 9;
+    assert($b->size() == $body + $central + 22);
+
+    assert(zipU32($b, 0) == 0x04034b50);
+    assert(zipU16($b, 6) == 0x0800);
+    assert(zipU16($b, 8) == 0);
+    assert(zipU32($b, 14) == Zip::crc32('hello'));
+    assert(zipU32($b, 18) == 5);
+    assert(zipU32($b, 22) == 5);
+    assert(zipU16($b, 26) == 4);
+    assert($b->sub(30, 4) == 'a.md');
+    assert($b->sub(34, 5) == 'hello');
+
+    assert(zipU32($b, $first) == 0x04034b50);
+    assert(zipU32($b, $first + 14) == 0);
+    assert(zipU32($b, $first + 18) == 0);
+    // the name length is in bytes, not characters
+    assert(zipU16($b, $first + 26) == 9);
+    assert($b->sub($first + 30, 9) == 'dir/é.md');
+
+    // the directory entries point back at their local headers
+    usize $c = $body;
+    assert(zipU32($b, $c) == 0x02014b50);
+    assert(zipU32($b, $c + 42) == 0);
+    assert($b->sub($c + 46, 4) == 'a.md');
+    usize $c2 = $c + 46 + 4;
+    assert(zipU32($b, $c2) == 0x02014b50);
+    assert(zipU32($b, $c2 + 42) == $first as uint32);
+    assert($b->sub($c2 + 46, 9) == 'dir/é.md');
+
+    // the end record counts both and finds the directory
+    usize $end = $body + $central;
+    assert(zipU32($b, $end) == 0x06054b50);
+    assert(zipU16($b, $end + 8) == 2);
+    assert(zipU16($b, $end + 10) == 2);
+    assert(zipU32($b, $end + 12) == $central as uint32);
+    assert(zipU32($b, $end + 16) == $body as uint32);
+}
+
+#[group: "zip"]
+test zip_bytes_is_repeatable
+{
+    Zip $z = Zip();
+    $z->add('x', 'y');
+    string $once = $z->bytes();
+    string $twice = $z->bytes();
+    assert($once == $twice);
+    $z->add('z', 'w');
+    assert($z->bytes()->size() > $once->size());
+}

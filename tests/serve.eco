@@ -24,3 +24,49 @@ test requested_is_rooted
     assert(Serve::requested('guide/') == '/guide/');
     assert(Serve::requested('/x') == '/x');
 }
+
+#[group: "serve"]
+test markdown_is_asked_for
+{
+    assert(Serve::wantsMarkdown('text/markdown'));
+    assert(Serve::wantsMarkdown('text/markdown, text/html;q=0.8'));
+    assert(Serve::wantsMarkdown('text/html;q=0.5, text/markdown'));
+    assert(Serve::wantsMarkdown('text/markdown, text/html'));
+    assert(Serve::wantsMarkdown('text/html, text/markdown;q=0.9') == false);
+    assert(Serve::wantsMarkdown('text/markdown;q=0') == false);
+    assert(Serve::wantsMarkdown('*/*') == false);
+    assert(Serve::wantsMarkdown('text/html,application/xhtml+xml,*/*;q=0.8') == false);
+    assert(Serve::wantsMarkdown('') == false);
+}
+
+#[group: "serve"]
+test negotiate_falls_back_without_a_twin
+{
+    // no output directory here, so no twin exists and the request stands
+    assert(Serve::negotiate('/nonexistent', 'guide/cli/', 'text/markdown') == 'guide/cli/');
+    assert(Serve::negotiate('/nonexistent', 'guide/cli/', 'text/html') == 'guide/cli/');
+}
+
+#[group: "serve"]
+test file_stays_inside_the_root
+{
+    string $root = 'ecobuild/test-serve';
+    ecodoc::sys::Sys::purge($root);
+    assert(ecodoc::sys::Sys::put("{$root}/index.html", '<h1>home</h1>'));
+    assert(ecodoc::sys::Sys::put("{$root}/guide/index.html", '<h1>guide</h1>'));
+    assert(ecodoc::sys::Sys::put("{$root}/a.css", 'body{}'));
+    assert(Serve::file($root, '', false)->body == '<h1>home</h1>');
+    assert(Serve::file($root, 'guide/', false)->body == '<h1>guide</h1>');
+    assert(Serve::file($root, 'guide', false)->body == '<h1>guide</h1>');
+    assert(Serve::file($root, 'a.css', false)->status == 200);
+    assert(Serve::file($root, 'nope/', false)->status == 404);
+    // `..`, encoded or not, and an absolute path never leave the root
+    assert(Serve::file($root, '../tests/serve.eco', false)->status == 404);
+    assert(Serve::file($root, '%2e%2e/tests/serve.eco', false)->status == 404);
+    assert(Serve::file($root, '/etc/hosts', false)->status == 404);
+    assert(Serve::file($root, '%2Fetc%2Fhosts', false)->status == 404);
+    // `//etc/hosts` under base `/` is `/etc/hosts` inside it
+    string $inside = Serve::relative('/', Serve::requested('//etc/hosts')) ?? '';
+    assert(Serve::file($root, $inside, false)->status == 404);
+    assert(Serve::negotiate($root, '/etc/hosts', 'text/markdown') == '/etc/hosts');
+}

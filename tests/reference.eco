@@ -1,0 +1,325 @@
+use ecodoc::api::{ApiMember, ApiNamespace, ApiType, Reference};
+use ecodoc::config::Site;
+use ecodoc::site::{Links, PageView, SearchIndex};
+use ecodoc::sys::Sys;
+
+// `tests/fixtures/decls/echoc` stands in for echoc: it prints the decls written here
+function refSite(string $api) : Site
+{
+    return Site::from(json::parse("{\"title\": \"lib\", \"api\": {$api}}")->or(json::object()));
+}
+
+function refRead(string $name, string $decls, const Site& $site) : Reference
+{
+    string $root = "ecobuild/test-api/{$name}";
+    Sys::mkdirs("{$root}/docs/.ecodoc");
+    Sys::put("{$root}/module.eco", '#[module: "lib"]');
+    Sys::put("{$root}/manifest.json", '{"name": "lib", "version": "1.2.0"}');
+    Sys::put("{$root}/decls.json", $decls);
+    // a stamp that never matches, so the decls are read fresh
+    Sys::put("{$root}/docs/.ecodoc/decls.stamp", '');
+    return Reference::read('tests/fixtures/decls/echoc', "{$root}/docs", $site)->or(Reference());
+}
+
+function refOf(string $name, string $declarations) : Reference
+{
+    return refRead($name, "{\"modules\": [{\"name\": \"lib\", \"declarations\": [{$declarations}]}]}", refSite('true'));
+}
+
+function refType(Reference $r, string $qualified) : ApiType
+{
+    foreach ($r->types as $t) {
+        if ($t->qualified == $qualified) {
+            return $t;
+        }
+    }
+    echo "no type {$qualified}";
+    assert(false);
+    return ApiType();
+}
+
+function refSpace(Reference $r, string $name) : ApiNamespace
+{
+    foreach ($r->namespaces as $ns) {
+        if ($ns->name == $name) {
+            return $ns;
+        }
+    }
+    echo "no namespace {$name}";
+    assert(false);
+    return ApiNamespace();
+}
+
+#[group: "reference"]
+test reference_reads_the_library
+{
+    Reference $r = refOf('library', '{"kind": "struct", "name": "P", "qualified": "a::P", "visibility": "public"}');
+    assert($r->library == 'lib');
+    assert($r->version == '1.2.0');
+    assert($r->types->count() == 1);
+    assert($r->types[0]->url == '/api/a/P/');
+    assert($r->root->ends('test-api/library'));
+}
+
+#[group: "reference"]
+test reference_missing_manifest_fails
+{
+    Site $s = refSite('{"manifest": "../nowhere.eco"}');
+    assert(Reference::read('tests/fixtures/decls/echoc', 'ecobuild/test-api/none/docs', $s)->failed());
+}
+
+#[group: "reference"]
+test reference_empty_and_bare_decls
+{
+    Reference $none = refRead('empty', '{}', refSite('true'));
+    assert($none->types->empty());
+    assert($none->namespaces->empty());
+    assert($none->symbolCount() == 0);
+    assert($none->tree()->empty());
+
+    // a declaration with nothing but a kind still lands somewhere, nameless
+    Reference $bare = refOf('bare', '{"kind": "function", "visibility": "public"}, {"kind": "struct", "visibility": "public"}');
+    assert($bare->types->count() == 1);
+    assert($bare->types[0]->name->empty());
+    ApiNamespace $global = refSpace($bare, '');
+    assert($global->functions->count() == 1);
+    assert($global->functions[0]->anchor == 'member');
+    assert($global->url == '/api/global/');
+}
+
+#[group: "reference"]
+test reference_visibility_and_hidden
+{
+    string $decls = '{"kind": "struct", "name": "Pub", "qualified": "a::Pub", "visibility": "public", "fields": [{"name": "x", "visibility": "public", "type": {"kind": "string"}}, {"name": "y", "visibility": "private", "type": {"kind": "string"}}]},
+        {"kind": "struct", "name": "Mod", "qualified": "a::Mod", "visibility": "internal"},
+        {"kind": "struct", "name": "Own", "qualified": "a::Own", "visibility": "private"},
+        {"kind": "function", "name": "gone", "qualified": "a::gone", "visibility": "public", "tools": [{"namespace": "docs", "name": "hidden", "value": null}]}';
+    Reference $pub = refOf('visibility', $decls);
+    assert($pub->types->count() == 1);
+    assert($pub->types[0]->members->count() == 1);
+    assert(refSpace($pub, 'a')->functions->empty());
+
+    string $all = "{\"modules\": [{\"name\": \"lib\", \"declarations\": [{$decls}]}]}";
+    Reference $internal = refRead('visibility-internal', $all, refSite('{"visibility": "internal"}'));
+    assert($internal->types->count() == 2);
+    Reference $private = refRead('visibility-private', $all, refSite('{"visibility": "private"}'));
+    assert($private->types->count() == 3);
+    assert(refType($private, 'a::Pub')->members->count() == 2);
+    // hidden stays hidden whatever the visibility
+    assert(refSpace($private, 'a')->functions->empty());
+}
+
+#[group: "reference"]
+test reference_modules_filter
+{
+    string $decls = '{"modules": [{"name": "lib", "declarations": [{"kind": "struct", "name": "A", "qualified": "A", "visibility": "public"}]}, {"name": "dep", "declarations": [{"kind": "struct", "name": "B", "qualified": "B", "visibility": "public"}]}]}';
+    Reference $every = refRead('modules-all', $decls, refSite('true'));
+    assert($every->types->count() == 2);
+    Reference $one = refRead('modules-one', $decls, refSite('{"modules": ["dep"]}'));
+    assert($one->types->count() == 1);
+    assert($one->types[0]->name == 'B');
+}
+
+#[group: "reference"]
+test reference_nested_namespaces
+{
+    Reference $r = refOf('nested', '{"kind": "struct", "name": "Deep", "qualified": "x::y::z::Deep", "visibility": "public"},
+        {"kind": "struct", "name": "Top", "qualified": "w::Top", "visibility": "public"},
+        {"kind": "function", "name": "f", "qualified": "x::f", "visibility": "public", "params": [], "return": {"kind": "prim", "name": "void"}}');
+    // every prefix exists, sorted, children hung under their parent
+    array<string> $names = array<string>();
+    foreach ($r->tree() as $ns) {
+        $names->push($ns->name);
+    }
+    string $order = str::join($names, ',');
+    echo $order;
+    assert($order == 'w,x,x::y,x::y::z');
+    ApiNamespace $x = refSpace($r, 'x');
+    assert($x->children->count() == 1);
+    assert($x->children[0]->name == 'x::y');
+    assert($x->hasPage());
+    ApiNamespace $y = refSpace($r, 'x::y');
+    assert($y->top() == false);
+    assert($y->leaf() == 'y::');
+    assert($y->slug() == 'x-y');
+    assert($y->tally() == '1 namespace');
+    assert($y->hasPage());
+    assert(refSpace($r, 'x::y::z')->tally() == '1 declaration');
+    // a top namespace holding one type gets no page of its own
+    assert(refSpace($r, 'w')->hasPage() == false);
+    assert(refType($r, 'x::y::z::Deep')->url == '/api/x/y/z/Deep/');
+}
+
+#[group: "reference"]
+test reference_overloads_share_a_member
+{
+    Reference $r = refOf('overloads', '{"kind": "struct", "name": "V", "qualified": "a::V", "visibility": "public", "methods": [
+            {"kind": "method", "name": "get", "visibility": "public", "const": true, "params": [], "return": {"kind": "string"}},
+            {"kind": "method", "name": "get", "visibility": "public", "const": true, "doc": "/** Second. */", "params": [{"name": "k", "type": {"kind": "string"}}], "return": {"kind": "string"}},
+            {"kind": "method", "name": "get", "visibility": "public", "doc": "/** Mutable. */", "params": [], "return": {"kind": "string"}},
+            {"kind": "static", "name": "make", "visibility": "public", "params": [], "return": {"kind": "named", "name": "a::V"}},
+            {"kind": "static", "name": "count", "visibility": "public", "params": [], "return": {"kind": "prim", "name": "usize"}}
+        ], "constructors": [
+            {"kind": "constructor", "name": "V", "qualified": "a::V", "visibility": "public", "params": []},
+            {"kind": "constructor", "name": "V", "qualified": "a::V", "visibility": "public", "params": [{"name": "x", "type": {"kind": "string"}}]}
+        ], "fields": [{"name": "Get", "visibility": "public", "type": {"kind": "string"}}]},
+        {"kind": "function", "name": "free", "qualified": "a::free", "visibility": "public", "params": []},
+        {"kind": "function", "name": "free", "qualified": "a::free", "visibility": "public", "params": [{"name": "s", "type": {"kind": "string"}}]}');
+    ApiType $v = refType($r, 'a::V');
+    foreach ($v->members as $m) {
+        echo "{$m->kind} {$m->name} {$m->decls->count()} {$m->anchor} {$m->section}";
+    }
+    assert($v->members->count() == 6);
+    ApiMember $ctor = $v->members[0];
+    assert($ctor->kind == 'constructor' && $ctor->decls->count() == 2 && $ctor->anchor == 'constructor');
+    // the const and the mutable `get` are two members, the docblock comes from the first overload that has one
+    ApiMember $query = $v->members[1];
+    assert($query->kind == 'const' && $query->decls->count() == 2);
+    assert($query->doc->summary == 'Second.');
+    assert($query->anchor == 'get' && $query->section == 'Queries');
+    ApiMember $method = $v->members[2];
+    assert($method->kind == 'method' && $method->anchor == 'get-2' && $method->section == 'Methods');
+    // a static handing back its own type is a constructor
+    assert($v->members[3]->name == 'make' && $v->members[3]->section == 'Constructors');
+    assert($v->members[4]->name == 'count' && $v->members[4]->section == 'Static functions');
+    // anchors are slugged, so the field `Get` is the third `get`
+    assert($v->members[5]->anchor == 'get-3' && $v->members[5]->url == '/api/a/V/#get-3');
+    assert(refSpace($r, 'a')->functions[0]->decls->count() == 2);
+
+    array<string> $sections = Reference::sections($v);
+    assert(str::join($sections, ',') == 'Constructors,Queries,Methods,Static functions,Properties');
+    assert(Reference::inSection($v, 'Constructors')->count() == 2);
+}
+
+#[group: "reference"]
+test reference_cases_and_groups
+{
+    Reference $r = refOf('cases', '{"kind": "enum", "name": "E", "qualified": "E", "visibility": "public", "tools": [{"namespace": "docs", "name": "groups", "value": {"kind": "list", "items": [{"kind": "string", "text": "Making"}]}}], "cases": [
+            {"name": "none", "payload": []},
+            {"name": "some", "payload": [{"name": "v", "type": {"kind": "string"}}]}
+        ], "methods": [
+            {"kind": "static", "name": "parse", "visibility": "public", "tools": [{"namespace": "docs", "name": "group", "value": {"kind": "string", "text": "Making"}}], "params": [], "return": {"kind": "named", "name": "E"}}
+        ]}');
+    ApiType $e = refType($r, 'E');
+    assert($e->ns->empty());
+    assert($e->url == '/api/E/');
+    assert($e->members[0]->section == 'Cases' && $e->members[0]->callable() == false);
+    assert($e->members[1]->section == 'Constructors' && $e->members[1]->callable());
+    assert($e->members[1]->badge() == 'static' && $e->members[1]->letter() == 's');
+    assert($e->members[2]->section == 'Making');
+    assert(str::join(Reference::sections($e), ',') == 'Making,Cases,Constructors');
+}
+
+#[group: "reference"]
+test reference_operators_and_extensions
+{
+    Reference $r = refOf('operators', '{"kind": "struct", "name": "P", "qualified": "a::P", "visibility": "public"},
+        {"kind": "operator", "name": "+", "qualified": "operator +", "visibility": "public", "params": [{"name": "a", "type": {"kind": "named", "name": "a::P"}}, {"name": "b", "type": {"kind": "named", "name": "a::P"}}], "return": {"kind": "named", "name": "a::P"}},
+        {"kind": "operator", "name": "[]=", "qualified": "operator []=", "visibility": "public", "params": [{"name": "a", "type": {"kind": "ptr", "borrow": true, "to": {"kind": "named", "name": "a::P"}}}, {"name": "i", "type": {"kind": "prim", "name": "usize"}}, {"name": "v", "type": {"kind": "prim", "name": "int32"}}], "return": {"kind": "prim", "name": "void"}},
+        {"kind": "operator", "name": "-", "qualified": "operator prefix -", "visibility": "public", "params": [{"name": "a", "type": {"kind": "prim", "name": "int32"}}], "return": {"kind": "prim", "name": "int32"}},
+        {"kind": "operator", "name": "~", "qualified": "operator prefix ~", "visibility": "public", "params": []},
+        {"kind": "function", "name": "from", "qualified": "str::from", "visibility": "public", "params": [{"name": "p", "type": {"kind": "ptr", "borrow": true, "to": {"kind": "named", "name": "a::P", "const": true}}}], "return": {"kind": "string"}},
+        {"kind": "function", "name": "from", "qualified": "str::from", "visibility": "public", "params": [{"name": "n", "type": {"kind": "prim", "name": "int32"}}], "return": {"kind": "string"}},
+        {"kind": "function", "name": "twice", "qualified": "a::twice", "visibility": "public", "params": [{"name": "p", "type": {"kind": "named", "name": "a::P"}}], "return": {"kind": "named", "name": "a::P"}}');
+    ApiType $p = refType($r, 'a::P');
+    assert($p->members->count() == 2);
+    assert($p->members[0]->anchor == 'op-2b');
+    assert($p->members[1]->anchor == 'op-index-set');
+    assert($p->members[1]->owner == 'a::P');
+    // an operator on something undocumented lives in the global namespace
+    ApiNamespace $global = refSpace($r, '');
+    assert($global->operators->count() == 2);
+    assert($global->operators[0]->anchor == 'op-2d');
+    assert($global->operators[0]->section == 'Operators');
+    assert($global->operators[1]->anchor == 'op-7e');
+    // a function in another namespace taking the type first is an extension, once
+    assert($p->extensions->count() == 1);
+    assert($p->extensions[0]->owner == 'str');
+    assert($p->extensions[0]->decls->count() == 2);
+    // one in the type's own namespace is not
+    assert(refSpace($r, 'a')->functions->count() == 1);
+}
+
+#[group: "reference"]
+test reference_urls_never_collide
+{
+    Reference $r = refOf('urls', '{"kind": "struct", "name": "Value", "qualified": "a::Value", "visibility": "public"},
+        {"kind": "class", "name": "value", "qualified": "a::value", "visibility": "public"},
+        {"kind": "struct", "name": "VALUE", "qualified": "a::VALUE", "visibility": "public"},
+        {"kind": "struct", "name": "global", "qualified": "global", "visibility": "public"},
+        {"kind": "function", "name": "f", "qualified": "f", "visibility": "public", "params": []}');
+    // sorted by qualified name, so the upper case claims first
+    assert(refType($r, 'a::VALUE')->url == '/api/a/VALUE/');
+    assert(refType($r, 'a::Value')->url == '/api/a/Value-2/');
+    assert(refType($r, 'a::value')->url == '/api/a/value-3/');
+    // types claim before namespaces
+    assert(refType($r, 'global')->url == '/api/global/');
+    assert(refSpace($r, '')->url == '/api/global-2/');
+}
+
+#[group: "reference"]
+test reference_constants_and_unknown_kinds
+{
+    Reference $r = refOf('constants', '{"kind": "const", "name": "MAX", "qualified": "a::MAX", "visibility": "public", "type": null, "value": "3"},
+        {"kind": "struct", "name": "S", "qualified": "a::S", "visibility": "public", "constants": [{"name": "LIMIT", "visibility": "public", "value": "4"}]}');
+    ApiNamespace $a = refSpace($r, 'a');
+    assert($a->constants->count() == 1);
+    assert($a->constants[0]->kind == 'constant');
+    assert($a->constants[0]->anchor == 'max');
+    assert($a->constants[0]->badge() == 'const');
+    assert($a->constants[0]->chip() == 'const');
+    ApiType $s = refType($r, 'a::S');
+    assert($s->members[0]->kind == 'constant' && $s->members[0]->section == 'Constants');
+    assert($r->symbolCount() == 3);
+}
+
+#[group: "reference"]
+test reference_register_and_render
+{
+    Reference $r = refOf('render', '{"kind": "struct", "name": "Value", "qualified": "a::b::Value", "visibility": "public", "doc": "/**\\n * A value.\\n *\\n * ```echo\\n * $v = 1;\\n * ```\\n */", "methods": [
+            {"kind": "method", "name": "get", "visibility": "public", "const": true, "doc": "/** First. */", "params": [], "return": {"kind": "string"}},
+            {"kind": "method", "name": "get", "visibility": "public", "const": true, "doc": "/** Second. */", "params": [{"name": "k", "type": {"kind": "string"}}], "return": {"kind": "string"}}
+        ]},
+        {"kind": "enum", "name": "E", "qualified": "E", "visibility": "public", "cases": [{"name": "q", "payload": [], "value": "it\'s"}]},
+        {"kind": "function", "name": "f", "qualified": "f", "visibility": "public", "doc": "/** Free. */", "params": [], "return": {"kind": "prim", "name": "void"}},
+        {"kind": "operator", "name": "-", "qualified": "operator prefix -", "visibility": "public", "params": [{"name": "a", "type": {"kind": "prim", "name": "int32"}}], "return": {"kind": "prim", "name": "int32"}}');
+    Site $site = refSite('true');
+    Links $links = Links();
+    $r->register($site, $links);
+    assert($links->symbols->get('a::b::Value') == '/api/a/b/Value/');
+    assert($links->symbols->get('a::b::Value::get') == '/api/a/b/Value/#get');
+    assert($links->labels->get('a::b::Value::get') == 'Value::get()');
+    assert($links->symbols->get('f') == '/api/global/#f');
+    assert($links->labels->get('a::b') == 'a::b::');
+    assert($r->summary('a::b::Value') == 'A value.');
+    assert($r->summary('f') == 'Free.');
+    assert($r->summary('nothing')->empty());
+    assert($links->twins->has('/api/'));
+    assert($links->twins->has('/api/a/b/Value/'));
+
+    SearchIndex $search = SearchIndex();
+    array<PageView> $views = $r->views($site, $links, $search);
+    array<string> $urls = array<string>();
+    foreach ($views as $v) {
+        $urls->push($v->url);
+        assert($v->markdown->empty() == false);
+    }
+    echo str::join($urls, ' ');
+    assert(str::join($urls, ' ') == '/api/ /api/E/ /api/a/b/Value/ /api/global/ /api/a/ /api/a/b/');
+
+    string $global = $views[3]->markdown;
+    echo $global;
+    // the global namespace has no `namespace` line, and no blank line in its place
+    assert($global->contains("```echo\n// Free.\nfunction f() : void;\n\noperator -(int32 $a) : int32;\n```"));
+
+    string $value = $views[2]->markdown;
+    assert($value->starts("# `a::b::Value`\n\n````echo\nnamespace a::b;\n"));
+    assert($value->contains("    // First.\n    const function get() : string;\n    // Second.\n    const function get(string $k) : string;\n"));
+
+    string $e = $views[1]->markdown;
+    assert($e->contains("case q = 'it\\'s';"));
+
+    string $index = $views[0]->markdown;
+    assert($index->contains('## Signatures'));
+    assert($index->contains('The reference of `lib` v1.2.0: 2 types.'));
+}

@@ -1,0 +1,96 @@
+namespace ecodoc::agents;
+
+use ecodoc::config::Site;
+use ecodoc::site::Links;
+use ecodoc::text::Lines;
+
+/**
+ * `llms.txt`: the site's front door for agents, in the format llmstxt.org
+ * proposes.
+ *
+ * ```txt
+ * # ecodoc
+ *
+ * > Documentation sites for Echo libraries, written in Echo.
+ *
+ * Every page of this site is also plain Markdown: ...
+ *
+ * ## Start
+ *
+ * - [Getting started](https://echolang.github.io/ecodoc/guide.md): Install it, ...
+ * ```
+ *
+ * It is a map, not the territory: a title, a line about the library, a
+ * word on how to read the rest, then one list of links per sidebar group,
+ * each link to a page's Markdown twin. An agent reads it once and fetches
+ * only the pages its task needs.
+ */
+public struct Llms
+{
+    /**
+     * `llms.txt`: the title, the description, how to read the site, then
+     * every page as a link under its sidebar group. The reference is listed
+     * namespace by namespace, and pages no sidebar lists go under `## Optional`.
+     */
+    public static function index(const Site& $site, Links $links, const Corpus& $c) : string
+    {
+        string $out = Llms::header($site, $links, $c);
+        foreach ($c->groups as $g) {
+            Llms::section($links, $g->title, $g->entries, $out);
+        }
+        Llms::section($links, $site->api->title, $c->api, $out);
+        Llms::section($links, 'Optional', $c->other, $out);
+        $out->append("\n");
+        return $out;
+    }
+
+    /**
+     * The title and description, then how to read the site, said once for
+     * agents: the `.md` rule, where to start, and where the signatures are.
+     */
+    private static function header(const Site& $site, Links $links, const Corpus& $c) : string
+    {
+        string $out = "# {$site->title}";
+        if ($site->description->empty() == false) {
+            $out->append("\n\n> {$site->description}");
+        }
+        $out->append("\n\nEvery page of this site is also plain Markdown: take its URL, drop the trailing slash and add `.md` (`/guide/intro/` is `/guide/intro.md`).");
+        if ($c->home->empty() == false) {
+            string $home = $links->twin('/');
+            $out->append(" Start with [the overview]({$home}).");
+        }
+        if ($c->api->empty() == false) {
+            string $api = $links->twin($c->api[0]->url);
+            $out->append(" The [API reference]({$api}) ends with `## Signatures`: every declaration of the library, one line each.");
+        }
+        if ($site->llms->intro->empty() == false) {
+            $out->append("\n\n");
+            $out->append($site->llms->intro);
+        }
+        return $out;
+    }
+
+    /**
+     * `## title` and a link per entry. Nothing for no entries.
+     */
+    private static function section(Links $links, const string& $title, const array<CorpusEntry>& $entries, string& $out) : void
+    {
+        if ($entries->empty()) {
+            return;
+        }
+        $out->append("\n\n## {$title}\n");
+        foreach ($entries as $e) {
+            Llms::item($links, $e, $out);
+        }
+    }
+
+    private static function item(Links $links, const CorpusEntry& $e, string& $out) : void
+    {
+        string $href = $links->twin($e->url);
+        $out->append("\n- [{$e->title}]({$href})");
+        if ($e->description->empty() == false) {
+            string $line = Lines::oneLine($e->description);
+            $out->append(": {$line}");
+        }
+    }
+}

@@ -26,6 +26,7 @@ Why Echo and not a `config.json`? Because the docs live next to an Echo library,
 | `version` | The version chip; defaults to the library's `#[version:]` |
 | `logo` | An image for the header instead of the initial tile |
 | `base` | The path the site is served under, `/libjson/` when the site lives below the domain root |
+| `url` | Where the site is published, `https://echolang.github.io/libjson`; makes the links agents read absolute |
 | `repo` | The repository link in the header |
 | `edit` | The "Edit this page" URL; `{path}` becomes the page's path in `docs/` |
 | `source` | Where source files are browsable; members link to `file#L12` below it |
@@ -75,3 +76,7 @@ Links are written as URLs: `/guide/install`. File paths like `guide/install.md` 
 | `title` | `"API"` | Its title in the sidebar and on its index page |
 
 What the reference shows, and the attributes that shape it, are on [the API page](./api.md).
+
+## Agents
+
+Every site is also written for agents: a Markdown twin of every page, `llms.txt`, and the docs as an agent skill. `#[docs::llms:]` tunes it and `#[docs::llms: false]` turns it off. [Docs for agents](./agents.md) has the keys.

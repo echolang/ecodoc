@@ -79,8 +79,13 @@ public struct Slugger
             return $base;
         }
         int32 $n = $this->seen->get($base) + 1;
-        $this->seen[$base] = $n;
         string $next = "{$base}-{$n}";
+        // skip a suffix another heading already has as its own text or `{#id}`
+        while ($this->seen->has($next)) {
+            $n = $n + 1;
+            $next = "{$base}-{$n}";
+        }
+        $this->seen[$base] = $n;
         $this->seen[$next] = 0;
         return $next;
     }
@@ -648,7 +653,12 @@ public class Renderer
             $out->append('<li>');
             string $inner = '';
             $this->blocks($item->children, $b->tight, $inline, $inner);
-            // a task list item, `- [ ] todo`
+            // a task list item, `- [ ] todo`, its text in a `<p>` when the list is loose
+            string $lead = '';
+            if ($inner->starts('<p>')) {
+                $lead = '<p>';
+                $inner = $inner->sub(3, $inner->size() - 3);
+            }
             if ($inner->starts('[ ] ') || $inner->starts('[x] ') || $inner->starts('[X] ')) {
                 bool $done = $inner->starts('[ ] ') == false;
                 string $rest = $inner->sub(4, $inner->size() - 4);
@@ -658,6 +668,7 @@ public class Renderer
                     $inner = "<input type=\"checkbox\" disabled> {$rest}";
                 }
             }
+            $out->append($lead);
             $out->append($inner);
             $out->append("</li>\n");
         }

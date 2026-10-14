@@ -1,0 +1,177 @@
+use ecodoc::api::Docblock;
+
+#[group: "docblock"]
+test docblock_empty_is_empty
+{
+    Docblock $d = Docblock::parse('');
+    assert($d->text->empty());
+    assert($d->summary->empty());
+    assert($d->rest->empty());
+    assert($d->example->empty());
+    assert($d->restWithoutExample->empty());
+    assert($d->params->empty());
+    assert($d->returns->empty());
+
+    Docblock $markers = Docblock::parse('/** */');
+    assert($markers->text->empty());
+    assert($markers->summary->empty());
+}
+
+#[group: "docblock"]
+test docblock_one_line
+{
+    // echoc hands a one-line block over as written, markers and all
+    Docblock $d = Docblock::parse('/** Just one. */');
+    echo $d->text;
+    assert($d->text == 'Just one.');
+    assert($d->summary == 'Just one.');
+    assert($d->rest->empty());
+}
+
+#[group: "docblock"]
+test docblock_summary_and_rest
+{
+    Docblock $d = Docblock::parse("/**\n * Lead line\n * continues.\n *\n * Second paragraph.\n *\n * Third.\n */");
+    assert($d->summary == "Lead line\ncontinues.");
+    assert($d->rest == "Second paragraph.\n\nThird.");
+    assert($d->text == "Lead line\ncontinues.\n\nSecond paragraph.\n\nThird.");
+    assert($d->restWithoutExample == $d->rest);
+}
+
+#[group: "docblock"]
+test docblock_summary_stops_at_a_block
+{
+    Docblock $list = Docblock::parse("/**\n * Lead.\n * - item\n */");
+    assert($list->summary == 'Lead.');
+    assert($list->rest == '- item');
+    Docblock $quote = Docblock::parse("/**\n * Lead.\n * > note\n */");
+    assert($quote->summary == 'Lead.');
+    Docblock $table = Docblock::parse("/**\n * Lead.\n * | a | b |\n */");
+    assert($table->summary == 'Lead.');
+    Docblock $box = Docblock::parse("/**\n * Lead.\n * ::: tip\n * x\n * :::\n */");
+    assert($box->summary == 'Lead.');
+    Docblock $fence = Docblock::parse("/**\n * Lead.\n * ```echo\n * a();\n * ```\n */");
+    assert($fence->summary == 'Lead.');
+    assert($fence->example == 'a();');
+}
+
+#[group: "docblock"]
+test docblock_leading_blank_lines
+{
+    Docblock $d = Docblock::parse("/**\n *\n *\n * After blanks.\n *\n */");
+    assert($d->text == 'After blanks.');
+    assert($d->summary == 'After blanks.');
+}
+
+#[group: "docblock"]
+test docblock_strip_one_star_one_space
+{
+    // the indent before the star goes, one star and one space after it go, the rest stays
+    string $s = Docblock::strip("/**\n     * Indented member.\n     *     code block\n     *** stars\n     */");
+    echo $s;
+    assert(str::rtrim($s) == "Indented member.\n    code block\n** stars");
+    // without the markers it is still read line by line
+    assert(Docblock::strip(" * a\n * b") == "a\nb");
+}
+
+#[group: "docblock"]
+test docblock_starless_keeps_relative_indent
+{
+    // echoc's text for a block written without stars
+    Docblock $d = Docblock::parse("/**\n    Starless doc.\n      indented more\n\n    Second para.\n*/");
+    echo $d->text;
+    assert($d->text == "Starless doc.\n  indented more\n\nSecond para.");
+    assert($d->summary == "Starless doc.\n  indented more");
+    // four spaces would make the second paragraph a code block
+    assert($d->rest == 'Second para.');
+}
+
+#[group: "docblock"]
+test docblock_windows_line_ends
+{
+    Docblock $d = Docblock::parse("/**\r\n * Windows.\r\n *\r\n * More.\r\n */");
+    assert($d->summary == 'Windows.');
+    assert($d->rest == 'More.');
+}
+
+#[group: "docblock"]
+test docblock_tags
+{
+    Docblock $d = Docblock::parse("/**\n * Halve it.\n *\n * Odd fails.\n *\n * @param $n   Even, at least `2`.\n * @param $flag\n * @return Half.\n */");
+    assert($d->summary == 'Halve it.');
+    assert($d->rest == 'Odd fails.');
+    assert($d->text->contains('@') == false);
+    assert($d->params->count() == 2);
+    assert($d->params[0]->name == '$n');
+    assert($d->params[0]->text == 'Even, at least `2`.');
+    assert($d->params[1]->name == '$flag');
+    assert($d->params[1]->text->empty());
+    assert($d->returns == 'Half.');
+
+    Docblock $s = Docblock::parse("/**\n * X.\n * @returns Many.\n * @return Last wins.\n */");
+    assert($s->returns == 'Last wins.');
+    assert($s->text == 'X.');
+}
+
+#[group: "docblock"]
+test docblock_bare_return_is_dropped
+{
+    // a tag with nothing after it is not prose
+    Docblock $d = Docblock::parse("/**\n * Does it.\n * @return\n * @returns\n */");
+    echo $d->text;
+    assert($d->text == 'Does it.');
+    assert($d->returns->empty());
+}
+
+#[group: "docblock"]
+test docblock_tags_inside_code_stay
+{
+    Docblock $d = Docblock::parse("/**\n * Sum.\n *\n * ```echo\n * /**\n *  * @param $a Shown.\n *  *\\/\n * add(1);\n * ```\n *\n * @param $b Real.\n */");
+    assert($d->params->count() == 1);
+    assert($d->params[0]->name == '$b');
+    assert($d->example->contains('@param $a Shown.'));
+    assert($d->text->contains('@param $a Shown.'));
+    assert($d->text->contains('@param $b') == false);
+}
+
+#[group: "docblock"]
+test docblock_example_taken_out
+{
+    Docblock $d = Docblock::parse("/**\n * S.\n *\n * Before.\n *\n * ```echo\n *     $x = 1;\n * echo $x;\n * ```\n *\n * After.\n */");
+    assert($d->summary == 'S.');
+    assert($d->example == "    $x = 1;\necho $x;");
+    assert($d->rest->contains('```echo'));
+    assert($d->restWithoutExample == "Before.\n\n\nAfter.");
+}
+
+#[group: "docblock"]
+test docblock_first_echo_fence_only
+{
+    // a titled fence counts, a second one stays in the prose, other languages are skipped
+    Docblock $d = Docblock::parse("/**\n * S.\n *\n * ```txt\n * not echo\n * ```\n *\n * ```echo title=\"a.eco\"\n * a();\n * ```\n *\n * ```eco\n * b();\n * ```\n */");
+    assert($d->example == 'a();');
+    assert($d->restWithoutExample->contains('not echo'));
+    assert($d->restWithoutExample->contains('b();'));
+    assert($d->restWithoutExample->contains('a();') == false);
+
+    // a tilde fence is not the example
+    Docblock $t = Docblock::parse("/**\n * S.\n *\n * ~~~echo\n * c();\n * ~~~\n */");
+    assert($t->example->empty());
+    assert($t->restWithoutExample == $t->rest);
+}
+
+#[group: "docblock"]
+test docblock_unclosed_example_stays
+{
+    Docblock $d = Docblock::parse("/**\n * S.\n *\n * ```echo\n * a();\n */");
+    assert($d->example->empty());
+    assert($d->restWithoutExample == "```echo\na();");
+}
+
+#[group: "docblock"]
+test docblock_without_markers
+{
+    Docblock $d = Docblock::parse("Plain text\n\nSecond.");
+    assert($d->summary == 'Plain text');
+    assert($d->rest == 'Second.');
+}

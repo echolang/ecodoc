@@ -1,0 +1,341 @@
+use std::io;
+use ecodoc::agents::{Corpus, Llms, Skill};
+use ecodoc::api::{ApiMember, Reference, Spell};
+use ecodoc::config::Site;
+use ecodoc::site::{Dist, Links, PageView, SearchIndex};
+use ecodoc::sys::{Sys, Zip};
+
+function manifest(string $src) : Site
+{
+    return Site::from(json::parse($src)->or(json::object()));
+}
+
+function page(string $url, string $title, string $md) : PageView
+{
+    PageView $v = PageView();
+    $v->url = $url;
+    $v->title = $title;
+    $v->description = "About {$title}";
+    $v->markdown = $md;
+    return $v;
+}
+
+#[group: "agents"]
+test llms_on_by_default
+{
+    Site $s = manifest('{"title": "lib"}');
+    assert($s->llms->enabled);
+    assert($s->llms->skill);
+    assert($s->llms->zip);
+    assert($s->llms->covers('/guide/'));
+}
+
+#[group: "agents"]
+test llms_false_turns_it_off
+{
+    Site $s = manifest('{"llms": false}');
+    assert($s->llms->enabled == false);
+    assert($s->llms->covers('/guide/') == false);
+}
+
+#[group: "agents"]
+test llms_object_tunes_it
+{
+    Site $s = manifest('{"llms": {"exclude": ["/guide/internal"], "intro": "Prefer guard.", "skill": {"name": "my-lib", "zip": false}}}');
+    assert($s->llms->enabled);
+    assert($s->llms->covers('/guide/intro/'));
+    assert($s->llms->covers('/guide/internal/secret/') == false);
+    assert($s->llms->intro == 'Prefer guard.');
+    assert($s->llms->skillName == 'my-lib');
+    assert($s->llms->zip == false);
+    Site $off = manifest('{"llms": {"skill": false}}');
+    assert($off->llms->skill == false);
+}
+
+#[group: "agents"]
+test url_sets_the_base
+{
+    Site $s = manifest('{"url": "https://echolang.github.io/ecodoc/"}');
+    assert($s->url == 'https://echolang.github.io/ecodoc');
+    assert($s->base == '/ecodoc/');
+    Site $root = manifest('{"url": "https://ecodoc.dev"}');
+    assert($root->base == '/');
+    Site $both = manifest('{"url": "https://x.dev/a", "base": "/b/"}');
+    assert($both->base == '/b/');
+}
+
+#[group: "agents"]
+test skill_names
+{
+    assert(Skill::slug('My Lib!') == 'my-lib');
+    assert(Skill::slug('  --json::Value--  ') == 'json-value');
+    assert(Skill::slug('über') == 'ber');
+    Site $s = manifest('{"title": "Fancy Docs", "description": "Parse things."}');
+    assert(Skill::name($s, Reference()) == 'fancy-docs');
+    string $d = Skill::description($s, Reference());
+    echo $d;
+    assert($d->starts('Fancy Docs: Parse things. Use when'));
+}
+
+#[group: "agents"]
+test zip_crc_and_records
+{
+    assert(Zip::crc32('123456789') == 3421780262);
+    assert(Zip::crc32('') == 0);
+    Zip $z = Zip();
+    $z->add('a/SKILL.md', 'hello');
+    string $b = $z->bytes();
+    // a local header first, the end record last with one entry
+    assert($b->byte(0) == 80 && $b->byte(1) == 75 && $b->byte(2) == 3 && $b->byte(3) == 4);
+    usize $end = $b->size() - 22;
+    assert($b->byte($end) == 80 && $b->byte($end + 1) == 75 && $b->byte($end + 2) == 5 && $b->byte($end + 3) == 6);
+    assert($b->byte($end + 10) == 1);
+}
+
+#[group: "agents"]
+test spell_line_is_plain_echo
+{
+    Links $links = Links();
+    $links->symbol('json::Value', '/api/json/Value/', 'Value');
+    Spell $spell = Spell($links);
+    $spell->qualify = true;
+    $spell->within = 'yaml';
+
+    ApiMember $m = ApiMember();
+    $m->kind = 'static';
+    $m->name = 'parse';
+    $m->owner = 'yaml::Doc';
+    json::Value $decl = json::parse('{"kind": "static", "name": "parse", "params": [{"name": "text", "mode": "const", "type": {"kind": "ptr", "borrow": true, "to": {"kind": "string"}}}, {"name": "strict", "type": {"kind": "prim", "name": "bool"}, "default_value": "false"}], "return": {"kind": "optional", "of": {"kind": "named", "name": "json::Value"}}}')->or(json::object());
+    string $line = $spell->line($m, $decl);
+    echo $line;
+    assert($line == 'static function parse(const string& $text, bool $strict = false) : json::Value?');
+
+    $spell->within = 'json';
+    string $short = $spell->line($m, $decl);
+    assert($short->ends(': Value?'));
+}
+
+#[group: "agents"]
+test corpus_follows_the_sidebar
+{
+    Site $s = manifest('{"title": "lib", "description": "A lib.", "nav": [{"text": "Guide", "link": "/guide/"}], "sidebar": [{"base": "/guide/", "items": [{"text": "Start", "items": [{"text": "Intro", "link": "/guide/intro"}, {"text": "Install", "link": "/guide/install"}]}, {"text": "Loose", "link": "/guide/loose"}]}]}');
+    array<PageView> $views = array<PageView>();
+    $views->push(page('/guide/install/', 'Install', "# Install\n"));
+    $views->push(page('/guide/intro/', 'Introduction', "# Introduction\n"));
+    $views->push(page('/', 'Index', "# lib\n"));
+    $views->push(page('/guide/loose/', 'Loose', "# Loose\n"));
+    $views->push(page('/guide/hidden/', 'Hidden', "# Hidden\n"));
+    $views->push(page('/404.html', 'Missing', ''));
+
+    Corpus $c = Corpus::collect($s, $views, Reference());
+    assert($c->home->count() == 1);
+    assert($c->home[0]->title == 'lib');
+    assert($c->groups->count() == 2);
+    assert($c->groups[0]->title == 'Start');
+    assert($c->groups[0]->entries[0]->title == 'Intro');
+    assert($c->groups[0]->entries[1]->url == '/guide/install/');
+    assert($c->groups[1]->title == 'Guide');
+    assert($c->other->count() == 1);
+    assert($c->other[0]->url == '/guide/hidden/');
+
+    Links $links = Links();
+    $links->origin = 'https://lib.dev';
+    foreach ($views as $v) {
+        $links->twins[$v->url] = true;
+    }
+    string $txt = Llms::index($s, $links, $c);
+    echo $txt;
+    assert($txt->starts("# lib\n\n> A lib.\n\n"));
+    assert($txt->contains("## Start\n\n- [Intro](https://lib.dev/guide/intro.md): About Introduction\n- [Install](https://lib.dev/guide/install.md)"));
+    assert($txt->contains("## Optional\n\n- [Hidden](https://lib.dev/guide/hidden.md)"));
+    assert($txt->contains('llms-full') == false);
+}
+
+#[group: "agents"]
+test skill_links_its_own_files
+{
+    assert(Skill::relative('references/guide/01-a.md', 'references/api/index.md') == '../api/index.md');
+    assert(Skill::relative('references/guide/01-a.md', 'references/guide/02-b.md') == '02-b.md');
+    assert(Skill::relative('SKILL.md', 'references/api/json.md') == 'references/api/json.md');
+
+    map<string, string> $local = map<string, string>();
+    $local['https://lib.dev/guide/manifest.md'] = 'references/guide/03-the-manifest.md';
+    $local['/api.md'] = 'references/api/index.md';
+    string $md = Skill::relink('See [m](https://lib.dev/guide/manifest.md#top "M"), [api](/api.md) and [x](https://x.dev/a.md).', 'SKILL.md', $local);
+    echo $md;
+    assert($md == 'See [m](references/guide/03-the-manifest.md#top "M"), [api](references/api/index.md) and [x](https://x.dev/a.md).');
+}
+
+#[group: "agents"]
+test url_path_is_the_base_unless_stated
+{
+    Site $s = manifest('{"title": "lib"}');
+    $s->publish('https://x.github.io/ecodoc/');
+    assert($s->url == 'https://x.github.io/ecodoc');
+    assert($s->base == '/ecodoc/');
+    $s->publish('https://docs.dev');
+    assert($s->base == '/');
+
+    Site $stated = manifest('{"title": "lib", "base": "/docs/"}');
+    $stated->publish('https://x.github.io/ecodoc');
+    assert($stated->base == '/docs/');
+}
+
+#[group: "agents"]
+test skill_slug_edges
+{
+    assert(Skill::slug('') == '');
+    assert(Skill::slug('---') == '');
+    assert(Skill::slug('a--b__c') == 'a-b-c');
+    assert(Skill::slug('Lib 2') == 'lib-2');
+    // cut at 64, and a cut that ends on a dash drops it
+    string $long = '';
+    for (int32 $i = 0; $i < 70; $i++) {
+        $long->append('a');
+    }
+    assert(Skill::slug($long)->size() == 64);
+    string $edge = '';
+    for (int32 $i = 0; $i < 63; $i++) {
+        $edge->append('b');
+    }
+    $edge->append(' tail');
+    string $cut = Skill::slug($edge);
+    assert($cut->size() == 63);
+    assert($cut->ends('-') == false);
+}
+
+#[group: "agents"]
+test skill_name_falls_back
+{
+    Site $named = manifest('{"title": "Site", "llms": {"skill": {"name": "Own Name"}}}');
+    assert(Skill::name($named, Reference()) == 'own-name');
+    Reference $ref = Reference();
+    $ref->library = 'libjson';
+    assert(Skill::name(manifest('{"title": "Site"}'), $ref) == 'libjson');
+    assert(Skill::name(manifest('{"title": "!!!"}'), Reference()) == 'docs');
+    assert(Skill::name(manifest('{}'), Reference()) == 'docs');
+}
+
+#[group: "agents"]
+test skill_relative_edges
+{
+    assert(Skill::relative('a/b/c.md', 'a/b/c.md') == 'c.md');
+    assert(Skill::relative('a/b/c.md', 'x.md') == '../../x.md');
+    assert(Skill::relative('a/b.md', 'a/b/c.md') == 'b/c.md');
+    assert(Skill::relative('references/x.md', 'references') == '../references');
+    assert(Skill::relative('', 'a.md') == 'a.md');
+}
+
+#[group: "agents"]
+test skill_relink_edges
+{
+    map<string, string> $local = map<string, string>();
+    $local['/a.md'] = 'references/a.md';
+    assert(Skill::relink('', 'SKILL.md', $local) == '');
+    assert(Skill::relink('no links here', 'SKILL.md', $local) == 'no links here');
+    assert(Skill::relink('[x](/a.md)', 'references/guide/01-x.md', $local) == '[x](../a.md)');
+    // a destination ends at a line break too, and one left open is still relinked
+    assert(Skill::relink("[x](/a.md\n[y](/a.md", 'SKILL.md', $local) == "[x](references/a.md\n[y](references/a.md");
+    // only an exact destination is local: angle brackets and queries stay as written
+    assert(Skill::relink('[x](</a.md>) [y](/a.md?v=1)', 'SKILL.md', $local) == '[x](</a.md>) [y](/a.md?v=1)');
+    assert(Skill::relink('trailing ](', 'SKILL.md', $local) == 'trailing ](');
+}
+
+#[group: "agents"]
+test llms_bare_site
+{
+    // no description, no pages in groups, no reference: the header and nothing else
+    Site $s = manifest('{"title": "lib"}');
+    Corpus $c = Corpus::collect($s, array<PageView>(), Reference());
+    assert($c->empty());
+    string $txt = Llms::index($s, Links(), $c);
+    echo $txt;
+    assert($txt->starts("# lib\n\nEvery page of this site is also plain Markdown"));
+    assert($txt->contains('> ') == false);
+    assert($txt->contains('## ') == false);
+    assert($txt->contains('Start with') == false);
+    assert($txt->ends(".md`).\n"));
+}
+
+#[group: "agents"]
+test llms_skips_empty_groups
+{
+    // a sidebar group whose pages have no twin is left out, and so is its title
+    Site $s = manifest('{"title": "lib", "llms": {"intro": "Prefer guard."}, "sidebar": [{"base": "/guide/", "items": [{"text": "Empty", "items": [{"text": "Gone", "link": "/guide/gone"}]}, {"text": "Full", "items": [{"text": "Here", "link": "/guide/here"}]}]}]}');
+    array<PageView> $views = array<PageView>();
+    $views->push(page('/guide/here/', 'Here', "# Here\n"));
+    PageView $gone = page('/guide/gone/', 'Gone', '');
+    $views->push($gone);
+    Corpus $c = Corpus::collect($s, $views, Reference());
+    assert($c->groups->count() == 1);
+    string $txt = Llms::index($s, Links(), $c);
+    echo $txt;
+    assert($txt->contains('## Empty') == false);
+    assert($txt->contains("## Full\n\n- [Here](/guide/here/): About Here"));
+    assert($txt->contains("\n\nPrefer guard.\n\n## Full"));
+}
+
+#[group: "agents"]
+test skill_front_matter_is_yaml
+{
+    Site $s = manifest('{"title": "lib", "description": "Say \\"hi\\": now.\\nTwo: lines \\\\ here."}');
+    string $d = Skill::description($s, Reference());
+    echo $d;
+    // one line, so the quoted scalar never breaks
+    assert($d->contains("\n") == false);
+    assert($d->starts('lib: Say "hi": now. Two: lines \\ here.'));
+
+    Dist $dist = Dist::open('ecobuild/test-skill-yaml')->or(Dist());
+    array<string> $warnings = array<string>();
+    Corpus $c = Corpus::collect($s, array<PageView>(), Reference());
+    guard Skill::write($dist, $s, Links(), $c, Reference(), $warnings) else {
+        die('the skill was not written');
+    };
+    string $md = io::readfile('ecobuild/test-skill-yaml/skill/lib/SKILL.md')->or('');
+    echo $md;
+    string $front = "---\nname: lib\ndescription: \"lib: Say \\\"hi\\\": now. Two: lines \\\\ here. Use when working with lib or asked how it works.\"\n---\n";
+    assert($md->starts($front));
+    assert(Sys::isFile('ecobuild/test-skill-yaml/skill/lib.zip'));
+}
+
+#[group: "agents"]
+test skill_description_is_clipped
+{
+    string $words = '';
+    for (int32 $i = 0; $i < 400; $i++) {
+        $words->append('word ');
+    }
+    Site $s = manifest("{\"title\": \"lib\", \"llms\": {\"skill\": {\"description\": \"{$words}\"}}}");
+    string $d = Skill::description($s, Reference());
+    assert($d->size() <= 1024);
+    assert($d->ends('…'));
+}
+
+#[group: "agents"]
+test skill_lists_namespaces_by_their_names
+{
+    Reference $ref = refOf('skill-names', '{"kind": "enum", "name": "E", "qualified": "E", "visibility": "public", "cases": [{"name": "x", "payload": []}]},
+        {"kind": "function", "name": "f", "qualified": "f", "visibility": "public", "params": [], "return": {"kind": "prim", "name": "void"}},
+        {"kind": "struct", "name": "V", "qualified": "a::V", "visibility": "public"},
+        {"kind": "function", "name": "g", "qualified": "a::g", "visibility": "public", "params": [], "return": {"kind": "prim", "name": "void"}}');
+    Site $s = manifest('{"title": "lib", "api": true}');
+    Links $links = Links();
+    $ref->register($s, $links);
+    SearchIndex $search = SearchIndex();
+    array<PageView> $views = $ref->views($s, $links, $search);
+    Corpus $c = Corpus::collect($s, $views, $ref);
+    assert($c->api->count() == 5);
+
+    Dist $dist = Dist::open('ecobuild/test-skill-names')->or(Dist());
+    array<string> $warnings = array<string>();
+    guard Skill::write($dist, $s, $links, $c, $ref, $warnings) else {
+        die('the skill was not written');
+    };
+    string $md = io::readfile('ecobuild/test-skill-names/skill/lib/SKILL.md')->or('');
+    echo $md;
+    // a namespace's own page is not one of the names it holds
+    assert($md->contains("- `references/api/global.md`: E\n"));
+    assert($md->contains("- `references/api/a.md`: V\n"));
+    assert(Sys::isFile('ecobuild/test-skill-names/skill/lib/references/api/global.md'));
+    assert($md->contains('Use when writing, reading or debugging Echo code that uses lib (a::)'));
+}

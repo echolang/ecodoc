@@ -643,6 +643,46 @@ public class Reference
         return $out;
     }
 
+    /**
+     * The members of `$t` in `$section`, in declaration order.
+     */
+    public static function inSection(ApiType $t, const string& $section) : array<ApiMember>
+    {
+        array<ApiMember> $out = array<ApiMember>();
+        foreach ($t->members as $m) {
+            if ($m->section == $section) {
+                $out->push($m);
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * What `$t` conforms to, then what `#[docs::see:]` names, resolved
+     * against the type as qualified names. What does not resolve is left out.
+     */
+    public static function related(ApiType $t, Links $links) : array<string>
+    {
+        array<string> $names = array<string>();
+        foreach (Field::items($t->decl, 'conforms') as $c) {
+            $names->push(Field::text($c, 'name'));
+        }
+        foreach (Field::strings($t->tools, 'see') as $s) {
+            $names->push($s);
+        }
+        array<string> $out = array<string>();
+        string $old = $links->scope;
+        $links->scope = $t->qualified;
+        foreach ($names as $n) {
+            string? $q = $links->resolve($n);
+            if ($q != null) {
+                $out->push($q ?? '');
+            }
+        }
+        $links->scope = $old;
+        return $out;
+    }
+
     // ------------------------------------------------------------------------
     // links, search, sidebar
 
@@ -674,13 +714,23 @@ public class Reference
     }
 
     /**
-     * Every symbol into `$links`, so `api:` links and type names resolve.
+     * Every symbol into `$links`, so `api:` links and type names resolve, and
+     * every page of the reference that gets a Markdown twin into `$links->twins`.
      *
-     * @param $site Unused. The symbols go into `$links`.
+     * @param $site Which pages are kept from agents.
      * @param $links One object for the whole build. Call this before any page renders.
      */
     public function register(const Site& $site, Links $links) : void
     {
+        Reference::twin($site, $links, $this->config->base);
+        foreach ($this->types as $t) {
+            Reference::twin($site, $links, $t->url);
+        }
+        foreach ($this->namespaces as $ns) {
+            if ($ns->hasPage()) {
+                Reference::twin($site, $links, $ns->url);
+            }
+        }
         foreach ($this->namespaces as $ns) {
             if ($ns->name->empty() == false) {
                 $links->symbol($ns->name, $ns->url, $ns->title());
@@ -717,6 +767,16 @@ public class Reference
                 }
                 $links->symbol($q, $m->url, $q);
             }
+        }
+    }
+
+    /**
+     * Give the page at `$url` a Markdown twin, unless the manifest keeps it from agents.
+     */
+    private static function twin(const Site& $site, Links $links, const string& $url) : void
+    {
+        if ($site->llms->covers($url)) {
+            $links->twins[$url] = true;
         }
     }
 
@@ -821,15 +881,27 @@ public class Reference
     public function views(const Site& $site, Links $links, SearchIndex& $search) : array<PageView>
     {
         array<PageView> $out = array<PageView>();
-        $out->push(ApiPages::index($this, $site, $links, $search));
+        PageView $index = ApiPages::index($this, $site, $links, $search);
+        if ($links->twins->has($index->url)) {
+            $index->markdown = ApiMarkdown::index($this, $site, $links);
+        }
+        $out->push($index);
         foreach ($this->types as $t) {
-            $out->push(ApiPages::type($this, $t, $site, $links, $search));
+            PageView $v = ApiPages::type($this, $t, $site, $links, $search);
+            if ($links->twins->has($v->url)) {
+                $v->markdown = ApiMarkdown::type($this, $t, $links);
+            }
+            $out->push($v);
         }
         foreach ($this->namespaces as $ns) {
             if ($ns->hasPage() == false) {
                 continue;
             }
-            $out->push(ApiPages::space($this, $ns, $site, $links, $search));
+            PageView $v = ApiPages::space($this, $ns, $site, $links, $search);
+            if ($links->twins->has($v->url)) {
+                $v->markdown = ApiMarkdown::space($this, $ns, $links);
+            }
+            $out->push($v);
         }
         return $out;
     }

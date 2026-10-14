@@ -298,6 +298,18 @@ public class ApiNamespace
     }
 
     /**
+     * Its functions, operators and constants: what it declares outside a type.
+     */
+    public const function loose() : array<ApiMember>
+    {
+        array<ApiMember> $out = array<ApiMember>();
+        $out->extend($this->functions);
+        $out->extend($this->operators);
+        $out->extend($this->constants);
+        return $out;
+    }
+
+    /**
      * Whether it gets a page of its own: it declares functions, operators or
      * constants, holds more than one type, or is part of a tree, with
      * namespaces below it or one above. Only a top namespace holding a single
@@ -317,7 +329,13 @@ public class ApiNamespace
     {
         usize $count = $this->functions->count() + $this->types->count() + $this->constants->count() + $this->operators->count();
         if ($count == 0 && $this->children->empty() == false) {
+            if ($this->children->count() == 1) {
+                return '1 namespace';
+            }
             return "{$this->children->count()} namespaces";
+        }
+        if ($count == 1) {
+            return '1 declaration';
         }
         return "{$count} declarations";
     }

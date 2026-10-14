@@ -1,0 +1,248 @@
+use ecodoc::api::{ApiMember, Spell};
+use ecodoc::site::Links;
+use ecodoc::text::Html;
+
+// the type trees below are copied from what `echoc build -p decls` prints
+
+function spellJson(string $src) : json::Value
+{
+    return json::parse($src)->or(json::object());
+}
+
+// the HTML of a type tree, as the text a reader sees
+function spellHtml(string $src) : string
+{
+    Spell $s = Spell(Links());
+    string $out = '';
+    $s->type(spellJson($src), $out);
+    return Html::text($out);
+}
+
+function spellMember(string $kind, string $name, bool $payload) : ApiMember
+{
+    ApiMember $m = ApiMember();
+    $m->kind = $kind;
+    $m->name = $name;
+    $m->owner = 'lib::Box';
+    $m->payload = $payload;
+    return $m;
+}
+
+function spellLine(ApiMember $m, string $decl, bool $declared) : string
+{
+    Spell $s = Spell(Links());
+    $s->declared = $declared;
+    return $s->line($m, spellJson($decl));
+}
+
+#[group: "spell"]
+test spell_plain_and_html_agree
+{
+    array<string> $trees = [
+        '{"kind": "prim", "name": "int32"}',
+        '{"kind": "prim", "name": "int32", "const": true}',
+        '{"kind": "string"}',
+        '{"kind": "array", "of": {"kind": "map", "key": {"kind": "string"}, "value": {"kind": "optional", "of": {"kind": "prim", "name": "int32"}}}, "const": true}',
+        '{"kind": "ptr", "to": {"kind": "named", "name": "a::P", "const": true}, "borrow": true, "weak": false, "const": false, "nullable": false}',
+        '{"kind": "ptr", "to": {"kind": "named", "name": "a::Box", "args": [{"kind": "named", "name": "T"}, {"kind": "named", "name": "N"}]}, "borrow": false, "weak": true, "const": false, "nullable": false}',
+        '{"kind": "function", "return": {"kind": "prim", "name": "int32"}, "params": [{"kind": "prim", "name": "int32"}, {"kind": "string"}], "extern": false}',
+        '{"kind": "function", "return": {"kind": "prim", "name": "void"}, "params": [], "extern": true}',
+        '{"kind": "optional", "of": {"kind": "named", "name": "json::Value"}}'
+    ];
+    array<string> $want = [
+        'int32',
+        'const int32',
+        'string',
+        'const array<map<string, int32?>>',
+        'const a::P&',
+        'weak<a::Box<T, N>>',
+        'function<int32(int32, string)>',
+        'extern function<void()>',
+        'json::Value?'
+    ];
+    for (usize $i = 0; $i < $trees->count(); $i++) {
+        string $plain = Spell::plain(spellJson($trees[$i]));
+        string $html = spellHtml($trees[$i]);
+        echo "{$plain} | {$html}";
+        assert($plain == $want[$i]);
+        assert($html == $want[$i]);
+    }
+}
+
+#[group: "spell"]
+test spell_raw_pointers
+{
+    // echoc marks every raw pointer nullable, and a `const ptr` const on the pointer itself
+    string $p = '{"kind": "ptr", "to": {"kind": "prim", "name": "int32"}, "borrow": false, "weak": false, "const": false, "nullable": true}';
+    string $cp = '{"kind": "ptr", "to": {"kind": "prim", "name": "int32"}, "borrow": false, "weak": false, "const": true, "nullable": true}';
+    string $pc = '{"kind": "ptr", "to": {"kind": "prim", "name": "int32", "const": true}, "borrow": false, "weak": false, "const": false, "nullable": true}';
+    assert(Spell::plain(spellJson($p)) == 'ptr<int32>');
+    assert(Spell::plain(spellJson($cp)) == 'const ptr<int32>');
+    assert(Spell::plain(spellJson($pc)) == 'ptr<const int32>');
+    assert(spellHtml($cp)->starts('const ptr<int32>'));
+    assert(spellHtml($pc)->starts('ptr<const int32>'));
+}
+
+#[group: "spell"]
+test spell_missing_and_unknown_kinds
+{
+    assert(Spell::plain(json::object()) == '');
+    assert(Spell::plain(spellJson('{"kind": "tuple"}')) == '');
+    assert(spellHtml('{}') == '');
+    // a named type without a kind is still a name
+    assert(Spell::plain(spellJson('{"name": "Thing"}')) == 'Thing');
+}
+
+#[group: "spell"]
+test spell_subject_looks_through
+{
+    assert(Spell::subject(spellJson('{"kind": "ptr", "borrow": true, "to": {"kind": "named", "name": "json::Value", "const": true}}')) == 'json::Value');
+    assert(Spell::subject(spellJson('{"kind": "optional", "of": {"kind": "ptr", "weak": true, "to": {"kind": "named", "name": "a::B"}}}')) == 'a::B');
+    assert(Spell::subject(spellJson('{"kind": "array", "of": {"kind": "named", "name": "a::B"}}')) == '');
+    assert(Spell::subject(spellJson('{"kind": "prim", "name": "int32"}')) == '');
+}
+
+#[group: "spell"]
+test spell_generics
+{
+    json::Value $d = spellJson('{"generics": [{"name": "T", "constraint": null}, {"name": "E", "constraint": "numeric"}]}');
+    assert(Spell::generics($d) == '<T, E : numeric>');
+    assert(Spell::generics(json::object()) == '');
+    Spell $s = Spell(Links());
+    string $html = '';
+    $s->genericsHtml($d, $html);
+    assert(Html::text($html) == '<T, E : numeric>');
+    string $none = '';
+    $s->genericsHtml(json::object(), $none);
+    assert($none->empty());
+}
+
+#[group: "spell"]
+test spell_method_params
+{
+    string $put = '{"kind": "method", "name": "put", "params": [{"name": "v", "label": null, "type": {"kind": "named", "name": "T"}, "default": false, "default_value": null, "mode": null, "move": true}, {"name": "n", "label": "label", "type": {"kind": "prim", "name": "int32"}, "default": true, "default_value": "5", "mode": null, "move": false}, {"name": "d", "type": {"kind": "prim", "name": "int32"}, "default": true}], "return": {"kind": "prim", "name": "void"}, "generics": []}';
+    string $line = spellLine(spellMember('method', 'put', false), $put, false);
+    echo $line;
+    assert($line == 'function put(mv T $v, label: int32 $n = 5, int32 $d = …) : void');
+    assert(Spell::brief(spellJson($put)) == 'put(T $v, label: int32 $n, int32 $d) : void');
+
+    string $get = '{"kind": "method", "name": "get", "const": true, "params": [], "return": {"kind": "ptr", "to": {"kind": "named", "name": "T"}, "borrow": true}}';
+    assert(spellLine(spellMember('const', 'get', false), $get, false) == 'const function get() : T&');
+
+    string $make = '{"kind": "static", "name": "make", "params": [], "generics": [{"name": "T", "constraint": "numeric"}], "return": {"kind": "named", "name": "lib::Box"}}';
+    assert(spellLine(spellMember('static', 'make', false), $make, false) == 'static function make<T : numeric>() : lib::Box');
+}
+
+#[group: "spell"]
+test spell_defaults_are_code
+{
+    // the default is source text, highlighted; plain text gets it back unescaped
+    string $f = "{\"kind\": \"function\", \"name\": \"free\", \"params\": [{\"name\": \"s\", \"type\": {\"kind\": \"string\"}, \"default\": true, \"default_value\": \"'a<b>'\"}], \"return\": {\"kind\": \"string\"}}";
+    assert(spellLine(spellMember('function', 'free', false), $f, false) == "function free(string $s = 'a<b>') : string");
+    Spell $s = Spell(Links());
+    string $html = '';
+    $s->signature(spellJson($f), $html);
+    assert($html->contains('<b>') == false);
+}
+
+#[group: "spell"]
+test spell_constructors
+{
+    string $ctor = '{"kind": "constructor", "name": "Box", "qualified": "lib::Box", "params": [{"name": "x", "label": "fromDefault", "type": {"kind": "prim", "name": "int32"}, "default": true, "default_value": "3"}], "return": {"kind": "named", "name": "lib::Box"}}';
+    ApiMember $m = spellMember('constructor', 'Box', false);
+    assert(spellLine($m, $ctor, false) == 'lib::Box(fromDefault: int32 $x = 3)');
+    assert(spellLine($m, $ctor, true) == 'constructor(fromDefault: int32 $x = 3)');
+}
+
+#[group: "spell"]
+test spell_operators
+{
+    string $plus = '{"kind": "operator", "name": "+", "qualified": "operator +", "params": [{"name": "a", "type": {"kind": "named", "name": "a::P"}}, {"name": "b", "type": {"kind": "named", "name": "a::P"}}], "return": {"kind": "named", "name": "a::P"}}';
+    string $neg = '{"kind": "operator", "name": "-", "qualified": "operator prefix -", "params": [{"name": "a", "type": {"kind": "named", "name": "a::P"}}], "return": {"kind": "named", "name": "a::P"}}';
+    string $index = '{"kind": "operator", "name": "[]", "params": [{"name": "a", "type": {"kind": "named", "name": "a::P"}}, {"name": "i", "type": {"kind": "prim", "name": "usize"}}], "return": {"kind": "prim", "name": "int32"}}';
+    string $set = '{"kind": "operator", "name": "[]=", "params": [{"name": "a", "type": {"kind": "named", "name": "a::P"}}, {"name": "i", "type": {"kind": "prim", "name": "usize"}}, {"name": "v", "type": {"kind": "prim", "name": "int32"}}], "return": {"kind": "prim", "name": "void"}}';
+    string $set2 = '{"kind": "operator", "name": "[]=", "params": [{"name": "a", "type": {"kind": "named", "name": "a::P"}}, {"name": "v", "type": {"kind": "prim", "name": "int32"}}], "return": {"kind": "prim", "name": "void"}}';
+    string $none = '{"kind": "operator", "name": "operator *", "params": [], "return": {"kind": "prim", "name": "int32"}}';
+    assert(spellLine(spellMember('operator', '+', false), $plus, false) == 'operator (a::P $a) + (a::P $b) : a::P');
+    assert(spellLine(spellMember('operator', '-', false), $neg, false) == 'operator -(a::P $a) : a::P');
+    assert(spellLine(spellMember('operator', '[]', false), $index, false) == 'operator (a::P $a)[usize $i] : int32');
+    assert(spellLine(spellMember('operator', '[]=', false), $set, false) == 'operator (a::P $a)[usize $i] = (int32 $v) : void');
+    assert(spellLine(spellMember('operator', '[]=', false), $set2, false) == 'operator (a::P $a)[] = (int32 $v) : void');
+    assert(spellLine(spellMember('operator', 'operator *', false), $none, false) == 'operator *() : int32');
+    assert(Spell::operatorSymbol('operator +') == '+');
+    assert(Spell::operatorSymbol('[]=') == '[]=');
+}
+
+#[group: "spell"]
+test spell_cases_fields_constants
+{
+    ApiMember $some = spellMember('case', 'some', true);
+    string $payload = '{"name": "some", "payload": [{"name": "v", "type": {"kind": "prim", "name": "int32"}}, {"name": "label", "type": {"kind": "string"}}]}';
+    assert(spellLine($some, $payload, false) == 'lib::Box::some(int32 $v, string $label)');
+    assert(spellLine($some, $payload, true) == 'case some(int32 $v, string $label)');
+
+    ApiMember $circle = spellMember('case', 'circle', false);
+    assert(spellLine($circle, '{"name": "circle", "payload": [], "value": "c"}', true) == "case circle = 'c'");
+    // an integer-backed case has no value, only a discriminant
+    assert(spellLine($circle, '{"name": "circle", "discriminant": 200, "payload": []}', true) == 'case circle');
+
+    ApiMember $count = spellMember('field', 'count', false);
+    assert(spellLine($count, '{"name": "count", "static": true, "type": {"kind": "prim", "name": "int32"}, "default": true, "default_value": "0"}', false) == 'static int32 $count = 0');
+    assert(spellLine($count, '{"name": "count", "static": false, "type": {"kind": "string"}, "default_value": null}', false) == 'string $count');
+
+    ApiMember $typed = spellMember('constant', 'TYPED', false);
+    assert(spellLine($typed, '{"kind": "const", "name": "TYPED", "type": "int32", "value": "3"}', false) == 'const int32 TYPED = 3');
+    ApiMember $name = spellMember('constant', 'NAME', false);
+    assert(spellLine($name, "{\"kind\": \"const\", \"name\": \"NAME\", \"type\": null, \"value\": \"'x'\"}", false) == "const NAME = 'x'");
+}
+
+#[group: "spell"]
+test spell_case_value_is_escaped
+{
+    // echoc hands the value over decoded; it goes back as a literal that parses
+    ApiMember $q = spellMember('case', 'q', false);
+    string $line = spellLine($q, "{\"name\": \"q\", \"payload\": [], \"value\": \"it's \\\\ two\\nlines\"}", true);
+    echo $line;
+    assert($line == "case q = 'it\\'s \\\\ two\\nlines'");
+    assert(Spell::quoted("a'b") == "'a\\'b'");
+    assert(Spell::quoted("tab\there") == "'tab\\there'");
+    assert(Spell::quoted('') == "''");
+}
+
+#[group: "spell"]
+test spell_breaks_wide_signatures
+{
+    string $f = '{"kind": "function", "name": "configure", "params": [{"name": "host", "type": {"kind": "string"}}, {"name": "port", "type": {"kind": "prim", "name": "uint16"}}], "return": {"kind": "prim", "name": "void"}}';
+    Spell $narrow = Spell(Links());
+    $narrow->width = 20;
+    string $html = '';
+    $narrow->signature(spellJson($f), $html);
+    assert($html->contains("\n    "));
+    Spell $wide = Spell(Links());
+    string $one = '';
+    $wide->signature(spellJson($f), $one);
+    assert($one->contains("\n") == false);
+    // no parameters means nothing to break
+    string $empty = '';
+    $narrow->signature(spellJson('{"kind": "function", "name": "a_very_long_function_name", "params": [], "return": {"kind": "prim", "name": "void"}}'), $empty);
+    assert($empty->contains("\n") == false);
+    // line() never breaks
+    ApiMember $m = spellMember('function', 'configure', false);
+    assert($narrow->line($m, spellJson($f)) == 'function configure(string $host, uint16 $port) : void');
+}
+
+#[group: "spell"]
+test spell_links_documented_types
+{
+    Links $links = Links();
+    $links->symbol('json::Value', '/api/json/Value/', 'Value');
+    Spell $s = Spell($links);
+    string $out = '';
+    $s->type(spellJson('{"kind": "optional", "of": {"kind": "named", "name": "json::Value"}}'), $out);
+    echo $out;
+    assert($out->contains('href="/api/json/Value/"'));
+    assert($out->contains('>Value</a>'));
+    string $other = '';
+    $s->type(spellJson('{"kind": "named", "name": "a::<b>"}'), $other);
+    assert($other == '<span class="t">a::&lt;b&gt;</span>');
+}

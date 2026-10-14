@@ -1,0 +1,12 @@
+#!/bin/sh
+# stands in for echoc in the reference tests: prints the <what>.json next to the manifest
+manifest=''
+what=''
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -m) manifest="$2"; shift ;;
+        -p) what="$2"; shift ;;
+    esac
+    shift
+done
+cat "$(dirname "$manifest")/$what.json"

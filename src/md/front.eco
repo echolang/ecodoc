@@ -336,6 +336,27 @@ public struct Yaml
     private static function uncomment(const string& $t) : string
     {
         if ($t->starts('"') || $t->starts("'")) {
+            // a comment may follow the closing quote
+            uint8 $q = $t->byte(0);
+            usize $k = 1;
+            while ($k < $t->size()) {
+                uint8 $b = $t->byte($k);
+                // `''` is a quote inside single quotes
+                if ($q == ch::APOS && $b == ch::APOS && $k + 1 < $t->size() && $t->byte($k + 1) == ch::APOS) {
+                    $k = $k + 2;
+                    continue;
+                }
+                if ($b == $q) {
+                    break;
+                }
+                if ($b == ch::BACKSLASH && $q == ch::QUOTE) {
+                    $k = $k + 1;
+                }
+                $k = $k + 1;
+            }
+            if ($k < $t->size() && str::trim($t->sub($k + 1, $t->size() - $k - 1))->starts('#')) {
+                return $t->sub(0, $k + 1);
+            }
             return $t->clone();
         }
         usize $at = $t->find(' #');

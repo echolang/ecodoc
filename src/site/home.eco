@@ -1,6 +1,7 @@
 namespace ecodoc::site;
 
 use ecodoc::config::{Field, Site};
+use ecodoc::md::Markdown;
 use ecodoc::text::Html;
 
 /**
@@ -131,6 +132,64 @@ public struct Home
             $out->append('<article class="doc">');
             $out->append($page->html);
             $out->append("</article>\n");
+        }
+        return $out;
+    }
+
+    /**
+     * The home page as Markdown: the hero as a title, its text and tagline,
+     * the actions as links, the features as a list, then the content.
+     * Links point at twins.
+     */
+    public static function markdown(const Page& $page, Links $links, const Site& $site) : string
+    {
+        json::Value $hero = Field::get($page->front, 'hero');
+        string $name = Field::text($hero, 'name');
+        if ($name->empty()) {
+            $name = $site->title->clone();
+        }
+        string $out = "# {$name}";
+        string $text = Field::text($hero, 'text');
+        if ($text->empty() == false) {
+            $out->append("\n\n**{$text}**");
+        }
+        string $tagline = Field::text($hero, 'tagline');
+        if ($tagline->empty()) {
+            $tagline = $site->description->clone();
+        }
+        if ($tagline->empty() == false) {
+            $out->append("\n\n> {$tagline}");
+        }
+        array<json::Value> $actions = Field::items($hero, 'actions');
+        if ($actions->empty() == false) {
+            $out->append("\n");
+            foreach ($actions as $a) {
+                string $href = $links->twin(Route::link(Field::text($a, 'link')));
+                string $label = Field::text($a, 'text');
+                $out->append("\n- [{$label}]({$href})");
+            }
+        }
+        array<json::Value> $features = Field::items($page->front, 'features');
+        if ($features->empty() == false) {
+            $out->append("\n\n## Features\n");
+            foreach ($features as $f) {
+                string $title = Field::text($f, 'title');
+                string $link = Field::text($f, 'link');
+                if ($link->empty() == false) {
+                    string $href = $links->twin(Route::link($link));
+                    $title = "[{$title}]({$href})";
+                }
+                string $details = Field::text($f, 'details');
+                $out->append("\n- **{$title}**: {$details}");
+            }
+        }
+        Markdown $m = Markdown($links);
+        string $body = $m->document($page->doc);
+        if ($body->empty() == false) {
+            $out->append("\n\n");
+            $out->append($body);
+        } else {
+            $out->append("\n");
         }
         return $out;
     }

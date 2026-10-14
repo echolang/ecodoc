@@ -1,0 +1,248 @@
+/*
+ * What is written for agents, gathered once: every page that has a
+ * Markdown twin, in the order a person would read the site.
+ */
+
+namespace ecodoc::agents;
+
+use ecodoc::api::Reference;
+use ecodoc::config::{Sidebar, SidebarItem, Site};
+use ecodoc::site::{Links, PageView, Route};
+
+/**
+ * One page as agents get it.
+ */
+public struct CorpusEntry
+{
+    /**
+     * The page title, or the qualified name of a type.
+     */
+    public string $title;
+
+    /**
+     * Where the HTML is served, without the base: `/guide/cli/`.
+     */
+    public string $url;
+
+    /**
+     * One line about the page. Empty when it has none.
+     */
+    public string $description;
+
+    /**
+     * The whole page, as Markdown.
+     */
+    public string $markdown;
+
+    /**
+     * For a page of the reference, the namespace it belongs to. Empty otherwise.
+     */
+    public string $space = '';
+}
+
+/**
+ * A titled run of pages: one group of the sidebar.
+ */
+public class CorpusGroup
+{
+    /**
+     * The group's title, as the sidebar shows it.
+     */
+    public string $title = '';
+
+    /**
+     * Its pages, top to bottom.
+     */
+    public array<CorpusEntry> $entries = array<CorpusEntry>();
+}
+
+/**
+ * Every page with a Markdown twin, in reading order: the home page, the
+ * sidebar's groups top to bottom, the reference namespace by namespace, and
+ * whatever no sidebar lists at the end.
+ *
+ * ```echo
+ * Corpus $c = Corpus::collect($site, $views, $ref);
+ * echo $c->groups[0]->title;     // Start
+ * echo $c->guides()->count();    // 6
+ * ```
+ *
+ * `llms.txt` and the skill read the same corpus, so the two never disagree
+ * on what the site holds or in which order. The order is the sidebar's on
+ * purpose: the author already decided what a reader should see first, and
+ * an agent is a reader in a hurry.
+ */
+public class Corpus
+{
+    /**
+     * The landing page, when the site has one with a twin.
+     */
+    public array<CorpusEntry> $home = array<CorpusEntry>();
+
+    /**
+     * The guide pages, as the sidebars group them.
+     */
+    public array<CorpusGroup> $groups = array<CorpusGroup>();
+
+    /**
+     * The reference: its index, then each namespace followed by its types.
+     */
+    public array<CorpusEntry> $api = array<CorpusEntry>();
+
+    /**
+     * Pages no sidebar lists, in the order they were found.
+     */
+    public array<CorpusEntry> $other = array<CorpusEntry>();
+
+    /**
+     * Gather the twins of `$views`.
+     *
+     * @param $site The sidebars give the order and the groups; the API sidebar is skipped, the reference has its own order.
+     * @param $views Every page of the build. Those without a twin are left out.
+     * @param $ref The reference, for its namespace tree. An empty one when the site has none.
+     */
+    public static function collect(const Site& $site, const array<PageView>& $views, Reference $ref) : Corpus
+    {
+        Corpus $c = Corpus();
+        map<string, usize> $at = map<string, usize>();
+        for (usize $i = 0; $i < $views->count(); $i++) {
+            if ($views[$i]->markdown->empty() == false) {
+                $at[$views[$i]->url] = $i;
+            }
+        }
+        map<string, bool> $taken = map<string, bool>();
+
+        if ($at->has('/')) {
+            CorpusEntry $home = Corpus::entry($views[$at->get('/')]);
+            // a landing page is called what the site is called
+            $home->title = $site->title->clone();
+            $c->home->push($home);
+            $taken['/'] = true;
+        }
+
+        foreach ($site->sidebars as $side) {
+            if ($site->api->enabled && $side->base == $site->api->base) {
+                continue;
+            }
+            CorpusGroup $loose = CorpusGroup();
+            $loose->title = Corpus::sectionTitle($site, $side);
+            bool $looseAdded = false;
+            foreach ($side->items as $item) {
+                if ($item->items->empty()) {
+                    // a bare link at the top joins the sidebar's own group
+                    Corpus::take($item, $views, $at, $taken, $loose->entries);
+                    if ($looseAdded == false && $loose->entries->empty() == false) {
+                        $c->groups->push($loose);
+                        $looseAdded = true;
+                    }
+                    continue;
+                }
+                CorpusGroup $group = CorpusGroup();
+                $group->title = $item->text->clone();
+                Corpus::take($item, $views, $at, $taken, $group->entries);
+                array<SidebarItem> $inner = array<SidebarItem>();
+                Sidebar::flatten($item->items, $inner);
+                foreach ($inner as $link) {
+                    Corpus::take($link, $views, $at, $taken, $group->entries);
+                }
+                if ($group->entries->empty() == false) {
+                    $c->groups->push($group);
+                }
+            }
+        }
+
+        if ($site->api->enabled) {
+            string $index = $site->api->base;
+            if ($at->has($index)) {
+                $c->api->push(Corpus::entry($views[$at->get($index)]));
+                $taken[$index] = true;
+            }
+            foreach ($ref->tree() as $ns) {
+                if ($ns->hasPage() && $at->has($ns->url) && $taken->has($ns->url) == false) {
+                    CorpusEntry $e = Corpus::entry($views[$at->get($ns->url)]);
+                    $e->title = $ns->title();
+                    $e->space = $ns->slug();
+                    $c->api->push($e);
+                    $taken[$ns->url] = true;
+                }
+                foreach ($ns->types as $t) {
+                    if ($at->has($t->url) && $taken->has($t->url) == false) {
+                        CorpusEntry $e = Corpus::entry($views[$at->get($t->url)]);
+                        $e->title = $t->qualified->clone();
+                        $e->space = $ns->slug();
+                        $c->api->push($e);
+                        $taken[$t->url] = true;
+                    }
+                }
+            }
+        }
+
+        foreach ($views as $v) {
+            if ($v->markdown->empty() || $taken->has($v->url)) {
+                continue;
+            }
+            $c->other->push(Corpus::entry($v));
+            $taken[$v->url] = true;
+        }
+        return $c;
+    }
+
+    /**
+     * The hand-written pages in reading order: home, the groups, then the
+     * unlisted ones. Everything but the reference.
+     */
+    public const function guides() : array<CorpusEntry>
+    {
+        array<CorpusEntry> $out = array<CorpusEntry>();
+        $out->extend($this->home);
+        foreach ($this->groups as $g) {
+            $out->extend($g->entries);
+        }
+        $out->extend($this->other);
+        return $out;
+    }
+
+    /**
+     * Whether nothing at all has a twin.
+     */
+    public const function empty() : bool
+    {
+        return $this->home->empty() && $this->groups->empty() && $this->api->empty() && $this->other->empty();
+    }
+
+    private static function entry(const PageView& $v) : CorpusEntry
+    {
+        return CorpusEntry($v->title, $v->url, $v->description, $v->markdown);
+    }
+
+    /**
+     * The page `$item` links to, onto `$into`, unless it has no twin or is already listed.
+     */
+    private static function take(const SidebarItem& $item, const array<PageView>& $views, const map<string, usize>& $at, map<string, bool>& $taken, array<CorpusEntry>& $into) : void
+    {
+        string $url = Route::path($item->link);
+        if ($url->empty() || Links::external($url) || $at->has($url) == false || $taken->has($url)) {
+            return;
+        }
+        CorpusEntry $e = Corpus::entry($views[$at->get($url)]);
+        if ($item->text->empty() == false) {
+            $e->title = $item->text->clone();
+        }
+        $into->push($e);
+        $taken[$url] = true;
+    }
+
+    /**
+     * What a sidebar's own links are grouped under: the nav link that leads
+     * to its base, else `Pages`.
+     */
+    private static function sectionTitle(const Site& $site, const Sidebar& $side) : string
+    {
+        foreach ($site->nav as $n) {
+            if ($n->link == $side->base) {
+                return $n->text->clone();
+            }
+        }
+        return 'Pages';
+    }
+}

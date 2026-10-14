@@ -1,4 +1,4 @@
-use ecodoc::md::{Document, Renderer};
+use ecodoc::md::{Document, Fence, Renderer, Slugger, Table};
 use ecodoc::site::Links;
 
 function md(string $src) : string
@@ -82,4 +82,440 @@ test html_and_escapes
     echo $html;
     assert($html->contains("<div class=\"x\">\nraw\n</div>"));
     assert($html->contains('1 &lt; 2 &amp; *not em*'));
+}
+
+#[group: "markdown"]
+test empty_and_blank_documents
+{
+    assert(md('') == '');
+    assert(md("\n\n   \n\t\n") == '');
+    assert(md("\r\n\r\n") == '');
+}
+
+#[group: "markdown"]
+test crlf_line_endings
+{
+    string $html = md("# A\r\n\r\npara\r\nline2\r\n\r\n- x\r\n- y\r\n\r\n```js\r\nlet x;\r\n```\r\n");
+    echo $html;
+    assert($html->contains("\r") == false);
+    assert($html->contains("<p>para\nline2</p>"));
+    assert($html->contains("<ul>\n<li>x</li>\n<li>y</li>\n</ul>"));
+    assert($html->contains('<span class="line">let x;</span>'));
+}
+
+#[group: "markdown"]
+test tabs_in_block_syntax
+{
+    assert(md("#\tTitle")->starts('<h1 id="title"'));
+    assert(md("-\tfoo\n-\tbar") == "<ul>\n<li>foo</li>\n<li>bar</li>\n</ul>\n");
+    assert(md(">\tquoted") == "<blockquote>\n<p>quoted</p>\n</blockquote>\n");
+    string $code = md("\tindented");
+    echo $code;
+    assert($code->contains('<span class="line">indented</span>'));
+}
+
+#[group: "markdown"]
+test unclosed_constructs
+{
+    string $fence = md("```js\nlet x;\n\nmore");
+    echo $fence;
+    assert($fence->contains('<span class="line">more</span>'));
+    string $box = md("::: tip\nhi");
+    assert($box->contains('<div class="callout tip">') && $box->contains('<p>hi</p>'));
+    assert(md('*foo and **bar and `code') == "<p>*foo and **bar and `code</p>\n");
+    assert(md('**a*') == "<p>*<em>a</em></p>\n");
+    assert(md('[a](/x "t') == "<p>[a](/x &quot;t</p>\n");
+    assert(md('[a](<') == "<p>[a](&lt;</p>\n");
+}
+
+#[group: "markdown"]
+test degenerate_inputs_do_not_crash
+{
+    array<string> $srcs = [
+        '\\', '[', '![', '<', '&', '<!--', '***', '_ _', '# {#}', '#', '`', '``', '[a][', '[a]: ', '[]: x',
+        '```', ':::', '::: x', '>', '-', '1.', '1234567890. x', '|', "| a |\n|", '<div', "<script>\nx",
+        "x\n=", 'https://', '~~a~~~', '&#;', "- \n  \n-", "> > > >", '[[[[[a]]]]]'
+    ];
+    foreach ($srcs as $src) {
+        md($src);
+    }
+    assert(md('#') == "<h1 id=\"section\" tabindex=\"-1\"><a class=\"anchor\" href=\"#section\" aria-label=\"Permalink to \">#</a></h1>\n");
+    assert(md('1234567890. x') == "<p>1234567890. x</p>\n");
+    assert(md('-') == "<ul>\n<li></li>\n</ul>\n");
+}
+
+#[group: "markdown"]
+test deep_nesting_is_capped
+{
+    string $src = '';
+    for (int32 $k = 0; $k < 40; $k++) {
+        $src->append('>');
+    }
+    $src->append(' deep');
+    string $html = md($src);
+    assert($html->contains('deep'));
+    assert(str::split($html, '<blockquote>')->owned()->count() <= 35);
+}
+
+#[group: "markdown"]
+test lists_with_mixed_markers
+{
+    assert(md("- a\n* b\n+ c") == "<ul>\n<li>a</li>\n</ul>\n<ul>\n<li>b</li>\n</ul>\n<ul>\n<li>c</li>\n</ul>\n");
+    assert(md("1. a\n2) b") == "<ol>\n<li>a</li>\n</ol>\n<ol start=\"2\">\n<li>b</li>\n</ol>\n");
+    string $nested = md("- a\n  * b\n    1. c\n- d");
+    echo $nested;
+    assert($nested == "<ul>\n<li>a<ul>\n<li>b<ol>\n<li>c</li>\n</ol>\n</li>\n</ul>\n</li>\n<li>d</li>\n</ul>\n");
+}
+
+#[group: "markdown"]
+test ordered_list_interrupting_paragraph
+{
+    assert(md("text\n2. two") == "<p>text\n2. two</p>\n");
+    assert(md("text\n1. one")->contains('<ol>'));
+    assert(md("text\n-") == "<h2 id=\"text\" tabindex=\"-1\">text<a class=\"anchor\" href=\"#text\" aria-label=\"Permalink to text\">#</a></h2>\n");
+}
+
+#[group: "markdown"]
+test thematic_break_ends_a_list
+{
+    string $html = md("- a\n- - -\n- b");
+    echo $html;
+    assert($html == "<ul>\n<li>a</li>\n</ul>\n<hr>\n<ul>\n<li>b</li>\n</ul>\n");
+    assert(md("* a\n* * *") == "<ul>\n<li>a</li>\n</ul>\n<hr>\n");
+}
+
+#[group: "markdown"]
+test empty_list_items
+{
+    assert(md("-\n- a\n-") == "<ul>\n<li></li>\n<li>a</li>\n<li></li>\n</ul>\n");
+    assert(md("1.\n2. b") == "<ol>\n<li></li>\n<li>b</li>\n</ol>\n");
+}
+
+#[group: "markdown"]
+test fence_blank_line_keeps_list_tight
+{
+    string $html = md("- a\n  ```\n  x\n\n  ```\n- b");
+    echo $html;
+    assert($html->starts("<ul>\n<li>a<div class=\"code surface\""));
+    assert($html->contains("<li>b</li>"));
+    string $loose = md("- a\n\n  ```\n  x\n  ```\n- b");
+    assert($loose->starts("<ul>\n<li><p>a</p>"));
+}
+
+#[group: "markdown"]
+test blockquote_with_list_and_code
+{
+    string $html = md("> - one\n> - two\n>\n> ```\n> fenced\n> ```\n\n> para\nlazy");
+    echo $html;
+    assert($html->starts("<blockquote>\n<ul>\n<li>one</li>\n<li>two</li>\n</ul>\n<div class=\"code surface\""));
+    assert($html->contains('<span class="line">fenced</span>'));
+    assert($html->contains("<blockquote>\n<p>para\nlazy</p>\n</blockquote>"));
+}
+
+#[group: "markdown"]
+test alerts_and_unknown_kinds
+{
+    assert(md("> [!TIP]\n> Go.")->starts('<div class="callout tip">'));
+    assert(md("> [!FOO]\n> Go.") == "<blockquote>\n<p>[!FOO]\nGo.</p>\n</blockquote>\n");
+    assert(md("> [!]") == "<blockquote>\n<p>[!]</p>\n</blockquote>\n");
+}
+
+#[group: "markdown"]
+test setext_versus_thematic_break
+{
+    string $html = md("Foo\n---\n\nBar\n===\n\n---\n\n- - -\n\n***\n\n___");
+    echo $html;
+    assert($html->starts('<h2 id="foo"'));
+    assert($html->contains('<h1 id="bar"'));
+    assert($html->contains("</h1>\n<hr>\n<hr>\n<hr>\n<hr>\n"));
+    // an underline with spaces inside is a break, with spaces after it is still an underline
+    assert(md("Foo\n- - -") == "<p>Foo</p>\n<hr>\n");
+    assert(md("Foo\n===   ")->starts('<h1 id="foo"'));
+    assert(md("Baz\n---  ")->starts('<h2 id="baz"'));
+    // a setext heading may run over lines
+    assert(md("a\nb\n===")->starts("<h1 id=\"a-b\" tabindex=\"-1\">a\nb<a"));
+}
+
+#[group: "markdown"]
+test atx_heading_edges
+{
+    assert(md('#5 bolt') == "<p>#5 bolt</p>\n");
+    assert(md('####### seven') == "<p>####### seven</p>\n");
+    assert(md('## Title ##')->contains('>Title<a'));
+    assert(md('## Title#')->contains('>Title#<a'));
+    assert(md('### ###')->starts('<h3 id="section"'));
+    string $id = md('## Use `{#x}` syntax {#real}');
+    echo $id;
+    assert($id->starts('<h2 id="real"'));
+    assert($id->contains('Use <code>{#x}</code> syntax<a'));
+    assert(md('## Spaced {#a b}')->contains('Spaced {#a b}<a'));
+}
+
+#[group: "markdown"]
+test heading_slugs_collide_and_unicode
+{
+    string $html = md("# Über Café\n\n## a-1\n\n## a\n\n## a\n\n## !!!\n\n## !!!\n\n## 2 b\n\n## Mine {#x}\n\n## x");
+    echo $html;
+    assert($html->contains('<h1 id="Über-café"'));
+    assert($html->contains('<h2 id="a-1"'));
+    assert($html->contains('<h2 id="a"'));
+    // the second `a` skips `a-1`, which the first heading already took
+    assert($html->contains('<h2 id="a-2"'));
+    assert($html->contains('<h2 id="section"'));
+    assert($html->contains('<h2 id="section-1"'));
+    assert($html->contains('<h2 id="_2-b"'));
+    assert($html->contains('<h2 id="x-1"'));
+}
+
+#[group: "markdown"]
+test slugger_never_repeats
+{
+    Slugger $s = Slugger();
+    assert($s->slug('a') == 'a');
+    assert($s->slug('a-1') == 'a-1');
+    assert($s->slug('a') == 'a-2');
+    assert($s->slug('a') == 'a-3');
+    $s->claim('b-1');
+    assert($s->slug('b') == 'b');
+    assert($s->slug('b') == 'b-2');
+    assert(Slugger::of('  --Hello,   World!--  ') == 'hello-world');
+    assert(Slugger::of('***') == '');
+}
+
+#[group: "markdown"]
+test link_titles_and_destinations
+{
+    string $html = md('[a](/u "t \\"q\\"") [b](</a b> \'x\') [c](foo(bar)) [d](a\\)b) [e](/f (paren))');
+    echo $html;
+    assert($html->contains('<a href="/u" title="t &quot;q&quot;">a</a>'));
+    assert($html->contains('<a href="/a b" title="x">b</a>'));
+    assert($html->contains('<a href="/guide/foo(bar)">c</a>'));
+    assert($html->contains('<a href="/guide/a)b">d</a>'));
+    assert($html->contains('<a href="/f" title="paren">e</a>'));
+}
+
+#[group: "markdown"]
+test link_labels_with_brackets_and_code
+{
+    assert(md('[a [b] c](/x)') == "<p><a href=\"/x\">a [b] c</a></p>\n");
+    assert(md('[`]`](/y)') == "<p><a href=\"/y\"><code>]</code></a></p>\n");
+    assert(md('\\[a](/x)') == "<p>[a](/x)</p>\n");
+    assert(md('[a] (/x)') == "<p>[a] (/x)</p>\n");
+}
+
+#[group: "markdown"]
+test url_as_link_text_is_not_nested
+{
+    string $html = md('[https://example.com](https://example.com) and https://b.dev');
+    echo $html;
+    assert($html == "<p><a href=\"https://example.com\" target=\"_blank\" rel=\"noreferrer\">https://example.com</a> and <a href=\"https://b.dev\" target=\"_blank\" rel=\"noreferrer\">https://b.dev</a></p>\n");
+}
+
+#[group: "markdown"]
+test autolinks_and_bare_urls
+{
+    string $html = md('<https://a.b/c?d=1&e=2> <me@x.org> https://q.dev/x). (see http://r.dev/a_b_) xhttps://no');
+    echo $html;
+    assert($html->contains('<a href="https://a.b/c?d=1&amp;e=2" target="_blank" rel="noreferrer">https://a.b/c?d=1&amp;e=2</a>'));
+    assert($html->contains('<a href="mailto:me@x.org">me@x.org</a>'));
+    assert($html->contains('<a href="https://q.dev/x" target="_blank" rel="noreferrer">https://q.dev/x</a>).'));
+    assert($html->contains('<a href="http://r.dev/a_b" target="_blank" rel="noreferrer">http://r.dev/a_b</a>_)'));
+    assert($html->contains('xhttps://no'));
+}
+
+#[group: "markdown"]
+test reference_definitions
+{
+    string $html = md("[x][Foo  Bar] [foo bar] [y][]\n\n[foo   bar]: /u 'T'\n[y]: <./intro.md> \"Y\"\n[bad]: /v notquoted");
+    echo $html;
+    assert($html->contains('<a href="/u" title="T">x</a> <a href="/u" title="T">foo bar</a>'));
+    assert($html->contains('<a href="/guide/intro/" title="Y">y</a>'));
+    // a definition with junk after it is just text
+    assert($html->contains('<p>[bad]: /v notquoted</p>'));
+}
+
+#[group: "markdown"]
+test text_is_escaped
+{
+    assert(md('a & "q" \'s\' > b') == "<p>a &amp; &quot;q&quot; 's' &gt; b</p>\n");
+    assert(md('`<b>&amp;</b>`') == "<p><code>&lt;b&gt;&amp;amp;&lt;/b&gt;</code></p>\n");
+    assert(md('1 <2> 3') == "<p>1 &lt;2&gt; 3</p>\n");
+    assert(md('&amp; &copy; &#169; &#x41; &bogus a&b') == "<p>&amp; &copy; &#169; &#x41; &amp;bogus a&amp;b</p>\n");
+}
+
+#[group: "markdown"]
+test attributes_are_escaped
+{
+    string $html = md('[x](/a"onmouseover="b) ![i"x](/p.png "t\\"x") [y](/z "<b>")');
+    echo $html;
+    assert($html->contains('<a href="/a&quot;onmouseover=&quot;b">x</a>'));
+    assert($html->contains('<img src="/p.png" alt="i&quot;x" title="t&quot;x" loading="lazy">'));
+    assert($html->contains('title="&lt;b&gt;"'));
+    string $code = md("```js\" onload=\"x [a\"b.js]\n<i>\n```");
+    echo $code;
+    assert($code->contains('data-lang="js&quot;"'));
+    assert($code->contains('a&quot;b.js'));
+    assert($code->contains('<i>') == false);
+    string $box = md("::: tip\" onclick=\"x\nhi\n:::");
+    assert($box->contains('class="callout tip&quot;"'));
+    assert(md('<https://x.dev/"><b>') == "<p><a href=\"https://x.dev/&quot;\" target=\"_blank\" rel=\"noreferrer\">https://x.dev/&quot;</a><b></p>\n");
+}
+
+#[group: "markdown"]
+test raw_html_passes_through
+{
+    // raw HTML is trusted, as in CommonMark: authors write the docs
+    assert(md('a <script>alert(1)</script> b') == "<p>a <script>alert(1)</script> b</p>\n");
+    assert(md("<script>\nalert(1)\n</script>") == "<script>\nalert(1)\n</script>\n");
+    assert(md('<span title="a > b">x</span>') == "<p><span title=\"a > b\">x</span></p>\n");
+}
+
+#[group: "markdown"]
+test inline_tags_open_a_paragraph
+{
+    assert(md('<kbd>Ctrl</kbd> + *C* <b>x</b>') == "<p><kbd>Ctrl</kbd> + <em>C</em> <b>x</b></p>\n");
+    assert(md('<img src="a.png">') == "<img src=\"a.png\">\n");
+    assert(md("text\n<span>x</span>") == "<p>text\n<span>x</span></p>\n");
+}
+
+#[group: "markdown"]
+test emphasis_edges
+{
+    assert(md('*a **b** c*') == "<p><em>a <strong>b</strong> c</em></p>\n");
+    assert(md('*a _b* c_') == "<p><em>a _b</em> c_</p>\n");
+    assert(md('a * b * c') == "<p>a * b * c</p>\n");
+    assert(md('~~a~~~') == "<p>~~a~~~</p>\n");
+    assert(md('~a~') == "<p><del>a</del></p>\n");
+    assert(md('foo*bar*baz') == "<p>foo<em>bar</em>baz</p>\n");
+}
+
+#[group: "markdown"]
+test code_spans_edges
+{
+    assert(md('`` a`b ``') == "<p><code>a`b</code></p>\n");
+    assert(md('` `') == "<p><code> </code></p>\n");
+    assert(md("`a\nb`") == "<p><code>a b</code></p>\n");
+    assert(md('``x`') == "<p>``x`</p>\n");
+}
+
+#[group: "markdown"]
+test hard_line_breaks
+{
+    assert(md("a  \nb\\\nc\n   d") == "<p>a<br>\nb<br>\nc\nd</p>\n");
+    assert(md('trailing  ') == "<p>trailing</p>\n");
+    assert(md('end\\') == "<p>end\\</p>\n");
+}
+
+#[group: "markdown"]
+test tables_ragged_rows
+{
+    string $html = md("| a | b | c |\n|---|:-:|---|\n| 1 |\n| 1 | 2 | 3 | 4 |\n| x \\| y | `p|q` | z |");
+    echo $html;
+    assert($html->contains('<th>a</th><th style="text-align: center">b</th><th>c</th>'));
+    assert($html->contains('<tr><td>1</td><td style="text-align: center"></td><td></td></tr>'));
+    assert($html->contains('<tr><td>1</td><td style="text-align: center">2</td><td>3</td></tr>'));
+    assert($html->contains('<td>x | y</td><td style="text-align: center"><code>p|q</code></td>'));
+    // a delimiter row with a different column count is no table
+    assert(md("| a | b |\n|---|") == "<p>| a | b |\n|---|</p>\n");
+    assert(md("a|b\n-|-") == "<div class=\"table-wrap\"><table>\n<thead><tr><th>a</th><th>b</th></tr>\n</thead>\n</table></div>\n");
+}
+
+#[group: "markdown"]
+test table_cells_split
+{
+    array<string> $cells = Table::cells('| a | `b|c` | d \\| e |');
+    assert($cells->count() == 3);
+    assert($cells[1] == '`b|c`');
+    assert($cells[2] == 'd | e');
+    assert(Table::cells('|')->count() == 1);
+    assert(Table::cells('a \\|')[0] == 'a |');
+}
+
+#[group: "markdown"]
+test fence_info_titles_and_marks
+{
+    string $html = md("```echo title=\"a.eco\" {1,3-4}\nx\ny\nz\nw\n```\n\n```ts [b.ts]:line-numbers {2}\nq\nr\n```");
+    echo $html;
+    assert($html->contains('<span class="dot"></span>a.eco</span>'));
+    assert($html->contains("<span class=\"line hl\">x</span>\n<span class=\"line\">y</span>\n<span class=\"line hl\">z</span>\n<span class=\"line hl\">w</span>"));
+    assert($html->contains('<span class="dot"></span>b.ts</span>'));
+    assert($html->contains('<pre class="code-body numbered">'));
+    assert($html->contains("<span class=\"line\">q</span>\n<span class=\"line hl\">r</span>"));
+}
+
+#[group: "markdown"]
+test fence_read_edges
+{
+    Fence $f = Fence::read('ECHO:line-numbers');
+    assert($f->lang == 'echo' && $f->numbers);
+    assert(Fence::read('echo {')->marked->count() == 0);
+    assert(Fence::read('echo }{')->marked->count() == 0);
+    assert(Fence::read('{3-1}')->marked->count() == 0);
+    assert(Fence::read('{0}')->marked->count() == 0);
+    assert(Fence::read('{99999999999}')->marked->count() == 0);
+    assert(Fence::read('{-3}')->marked->count() == 0);
+    assert(Fence::read('sh title="x')->title == '');
+    assert(Fence::read('sh [x')->title == '');
+    assert(Fence::read('sh plain')->plain);
+    Fence $g = Fence::read('echo {2, 4-5 ,x}');
+    assert($g->isMarked(2) && $g->isMarked(4) && $g->isMarked(5));
+    assert($g->isMarked(3) == false && $g->isMarked(0) == false && $g->isMarked(99) == false);
+}
+
+#[group: "markdown"]
+test fence_lengths_and_info
+{
+    assert(md("````\n```\n````")->contains('<span class="line">```</span>'));
+    assert(md("~~~\n```\n~~~")->contains('<span class="line">```</span>'));
+    // a backtick fence's info may not hold a backtick, so this is a code span
+    assert(md('```a`b```') == "<p><code>a`b</code></p>\n");
+    assert(md("```\n```")->contains('<span class="line"></span>'));
+}
+
+#[group: "markdown"]
+test containers_nest
+{
+    string $more = md("::: tip\n:::: warning\ninner\n::::\nafter\n:::");
+    echo $more;
+    assert($more->contains("<p>inner</p>\n</div></div>\n<p>after</p>\n</div></div>\n"));
+    assert($more->contains(':::') == false);
+    string $fewer = md(":::: tip\n::: warning\ninner\n:::\nafter\n::::");
+    assert($fewer->contains("<p>inner</p>\n</div></div>\n<p>after</p>\n</div></div>\n"));
+    string $fenced = md("::: tip\n```\n:::\n```\n:::");
+    assert($fenced->contains('<span class="line">:::</span>'));
+    assert(md("::: details Why *not*\nx\n:::")->starts('<details class="callout details"><summary>Why <em>not</em></summary>'));
+}
+
+#[group: "markdown"]
+test task_lists
+{
+    assert(md("- [ ] a\n- [x] b") == "<ul>\n<li><input type=\"checkbox\" disabled> a</li>\n<li><input type=\"checkbox\" checked disabled> b</li>\n</ul>\n");
+    string $loose = md("- [ ] a\n\n- [X] b");
+    echo $loose;
+    assert($loose == "<ul>\n<li><p><input type=\"checkbox\" disabled> a</p>\n</li>\n<li><p><input type=\"checkbox\" checked disabled> b</p>\n</li>\n</ul>\n");
+    assert(md('- [y] no') == "<ul>\n<li>[y] no</li>\n</ul>\n");
+}
+
+#[group: "markdown"]
+test headings_feed_the_outline
+{
+    Links $links = Links();
+    $links->page = 'guide/test.md';
+    Renderer $r = Renderer($links);
+    $r->document(Document::parse("# The *Title*\n\nIntro.\n\n## Next\n\nBody & more.\n\n# Second", 1));
+    assert($r->title == 'The Title');
+    assert($r->headings->count() == 3);
+    assert($r->headings[0]->html == 'The <em>Title</em>');
+    assert($r->headings[0]->body == 'Intro.');
+    assert($r->headings[1]->body == 'Body & more.');
+}
+
+#[group: "markdown"]
+test line_numbers_follow_the_source
+{
+    Document $doc = Document::parse("para\n\n- a\n- b\n\n> q", 5);
+    assert($doc->blocks[0]->line == 5);
+    assert($doc->blocks[1]->line == 7);
+    assert($doc->blocks[1]->children[1]->line == 8);
+    assert($doc->blocks[2]->line == 10);
 }

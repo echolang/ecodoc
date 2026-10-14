@@ -15,6 +15,7 @@ ecodoc serve               # build, then serve docs/dist as deployed on :6423
 | `--out`, `-o <dir>` | build, dev, serve | Where the site is written, `<docs>/dist` by default |
 | `--echoc <path>` | all | The compiler; `$ECHOC` or `echoc` on `PATH` otherwise |
 | `--base <path>` | build, serve | Serve under this path, overriding `#[docs::base:]` |
+| `--url <url>` | build, serve | Where the site is published, overriding `#[docs::url:]` |
 | `--port`, `-p <n>` | dev, serve | The port, `3246` for dev and `6423` for serve by default |
 | `--strict` | build, serve | Fail on a dead link or an unresolved symbol |
 
@@ -33,6 +34,8 @@ Reading the reference means compiling the library, which is the slow part of a b
 `dev` is for writing: it serves from `/` whatever the manifest says, and slips a reload script into every page.
 
 `serve` shows you the site a deploy would get instead. It builds the way `build` does, then serves the output untouched under the real base path. A site with `#[docs::base: "/your-lib/"]` answers at `http://localhost:6423/your-lib/`, and `/` sends you there. Nothing is watched, so run it again after a change. It only listens on `127.0.0.1`.
+
+Both answer a request with `Accept: text/markdown` with the page's [Markdown twin](./agents.md), so you can see what an agent gets: `curl -H 'Accept: text/markdown' localhost:6423/guide/`.
 
 ## Deploying
 
@@ -70,6 +73,7 @@ jobs:
       - uses: echolang/ecodoc@v0
         with:
           base: /${{ github.event.repository.name }}/
+          url: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
           strict: true
 
   deploy:
@@ -99,6 +103,7 @@ To check the docs on a pull request without deploying, run the same `build` job 
 | `docs` | `docs` | The docs folder |
 | `out` | `<docs>/dist` | Where the site is written |
 | `base` | the manifest's | Serve under this path |
+| `url` | the manifest's | Where the site is published, for the absolute links agents read |
 | `strict` | `false` | Fail on a dead link or an unresolved symbol |
 | `epm-install` | `true` | Run `epm install` first when there is an `epm.lock.json` |
 | `pages` | `true` | Upload the site as the Pages artifact |

@@ -97,7 +97,8 @@ public struct Html
         }
         if ($i < $t->size()) {
             uint8 $b = $t->byte($i);
-            if ($b != ch::SPACE && $b != ch::GT && $b != ch::SLASH && $b != ch::TAB) {
+            // attributes may start on the next line
+            if ($b != ch::SPACE && $b != ch::GT && $b != ch::SLASH && $b != ch::TAB && $b != ch::LF && $b != ch::CR) {
                 return '';
             }
         }

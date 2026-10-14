@@ -20,3 +20,95 @@ test names
     assert(Path::join('a/', 'b') == 'a/b');
     assert(Path::join('a', '/b') == '/b');
 }
+
+#[group: "path"]
+test normalize_edges
+{
+    assert(Path::normalize('') == '.');
+    assert(Path::normalize('.') == '.');
+    assert(Path::normalize('/') == '/');
+    assert(Path::normalize('//') == '/');
+    assert(Path::normalize('a/..') == '.');
+    assert(Path::normalize('/a/..') == '/');
+    assert(Path::normalize('/a/../') == '/');
+    assert(Path::normalize('a/../..') == '..');
+    assert(Path::normalize('../../a') == '../../a');
+    assert(Path::normalize('a/b/') == 'a/b/');
+    assert(Path::normalize('./a') == 'a');
+    assert(Path::normalize('a/./') == 'a/');
+    assert(Path::normalize('café/ü/../x') == 'café/x');
+}
+
+#[group: "path"]
+test normalize_never_turns_relative_into_absolute
+{
+    // a relative path that resolves to nothing stays relative
+    assert(Path::normalize('./') == '.');
+    assert(Path::normalize('a/../') == '.');
+    assert(Path::normalize('guide/../') == '.');
+    assert(Path::normalize(Path::join(Path::dir('guide/a.md'), '../')) == '.');
+}
+
+#[group: "path"]
+test dir_and_base_edges
+{
+    assert(Path::dir('') == '.');
+    assert(Path::dir('/') == '/');
+    assert(Path::dir('/a') == '/');
+    assert(Path::dir('a/') == 'a');
+    assert(Path::dir('a/b/c') == 'a/b');
+    assert(Path::base('') == '');
+    assert(Path::base('/') == '');
+    assert(Path::base('a/') == '');
+    assert(Path::base('/a') == 'a');
+    assert(Path::base('plain') == 'plain');
+}
+
+#[group: "path"]
+test stem_and_ext_edges
+{
+    assert(Path::stem('') == '');
+    assert(Path::ext('') == '');
+    assert(Path::stem('README') == 'README');
+    assert(Path::ext('README') == '');
+    // a dotfile has no extension
+    assert(Path::stem('.gitignore') == '.gitignore');
+    assert(Path::ext('.gitignore') == '');
+    assert(Path::stem('a/b.tar.gz') == 'b.tar');
+    assert(Path::ext('a/b.tar.gz') == '.gz');
+    assert(Path::stem('v1.2/readme') == 'readme');
+    assert(Path::ext('v1.2/readme') == '');
+    assert(Path::stem('a.') == 'a');
+    assert(Path::ext('a.') == '.');
+    assert(Path::stem('über.md') == 'über');
+}
+
+#[group: "path"]
+test join_edges
+{
+    assert(Path::join('', 'b') == 'b');
+    assert(Path::join('.', 'b') == 'b');
+    assert(Path::join('a', '') == 'a');
+    assert(Path::join('', '') == '');
+    assert(Path::join('/', 'b') == '/b');
+    assert(Path::join('a/b', 'c/d') == 'a/b/c/d');
+}
+
+#[group: "path"]
+test last_byte
+{
+    assert(Path::lastByte('', 47) == 0);
+    assert(Path::lastByte('abc', 47) == 3);
+    assert(Path::lastByte('/', 47) == 0);
+    assert(Path::lastByte('a/b/c', 47) == 3);
+}
+
+#[group: "path"]
+test normalize_up_to_nothing_is_dot
+{
+    // a relative path that climbs back to where it started is `.`, never the root
+    assert(Path::normalize('a/../') == '.');
+    assert(Path::normalize('a/b/../../') == '.');
+    assert(Path::normalize('/a/../') == '/');
+    assert(Path::normalize('a/b/../') == 'a/');
+}

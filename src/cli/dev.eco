@@ -81,7 +81,7 @@ public struct Dev
             return $r;
         });
         $app->get('/{path*}', function(http::Request $req) : http::Response {
-            return Serve::file($out, $req->param('path') ?? '', true);
+            return Serve::page($out, $req->param('path') ?? '', $req, true);
         });
 
         io::println("ecodoc: serving http://localhost:{$port}/ (ctrl-c stops)");

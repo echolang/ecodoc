@@ -111,6 +111,17 @@ With `autolink` on (the default), inline code that spells a symbol exactly becom
 
 The attributes that shape a page (`group`, `valid`, `outcomes`, and the rest) are in [the API guide](docs/guide/api.md).
 
+## For agents
+
+Most of your docs' readers will be coding agents, so every site is written for them too, next to the HTML:
+
+- **A Markdown twin of every page**: `/guide/cli/` is also `/guide/cli.md`, with every link and `api:` symbol resolved and containers as GitHub alerts.
+- **The reference as interfaces**: a type's twin is one block of Echo declarations with the docblocks as comments, and `api.md` ends with every signature of the library.
+- **`llms.txt`**: the site as one list of links, in sidebar order.
+- **An agent skill**: `skill/<library>/` and a `.zip`, to drop into `.claude/skills/` or upload to claude.ai.
+
+`serve` and `dev` answer `Accept: text/markdown` with the twin. `#[docs::url:]` makes the links absolute; `#[docs::llms: false]` turns it all off. Details in [the agents guide](docs/guide/agents.md).
+
 ## Commands
 
 Four commands. Each reads `./docs` unless you point it somewhere else.
@@ -132,6 +143,7 @@ Why those ports? Type ECHO on a phone keypad and you get 3246. `serve` is the ec
 | `--out`, `-o <dir>` | build, dev, serve | where the site is written |
 | `--echoc <path>` | all | the compiler. `$ECHOC`, or `echoc` on `PATH` |
 | `--base <path>` | build, serve | serve under this path, overriding the manifest |
+| `--url <url>` | build, serve | where the site is published, overriding the manifest |
 | `--port`, `-p <n>` | dev, serve | the listen port |
 | `--strict` | build, serve | fail on a dead link or an unresolved symbol |
 
@@ -146,6 +158,7 @@ ecodoc is also a GitHub Action. In a library's workflow:
 - uses: echolang/ecodoc@v0
   with:
     base: /${{ github.event.repository.name }}/
+    url: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
     strict: true
 ```
 
@@ -157,6 +170,7 @@ Deploying, the base path, and the harbor one-liner are in [the command line guid
 - [The manifest](docs/guide/manifest.md)
 - [Pages](docs/guide/pages.md)
 - [API reference](docs/guide/api.md)
+- [Docs for agents](docs/guide/agents.md)
 
 ## Working on ecodoc
 

@@ -1,0 +1,43 @@
+use std::env;
+use std::io;
+use ecodoc::{Builder, Failure};
+use ecodoc::sys::Sys;
+
+#[group: "build"]
+test fixture_site_for_agents
+{
+    Builder $b = Builder();
+    string $echoc = 'echoc';
+    $b->echoc = string::from(env::var('ECHOC', $echoc));
+    $b->docs = 'tests/fixtures/site/docs';
+    $b->out = 'ecobuild/test-site';
+    $b->url = 'https://fixture.dev/docs';
+    status<Failure> $built = $b->build();
+    assert($built->failed() == false);
+
+    // every page has its twin next to it, the agent files at the root
+    assert(Sys::isFile('ecobuild/test-site/index.md'));
+    assert(Sys::isFile('ecobuild/test-site/guide.md'));
+    assert(Sys::isFile('ecobuild/test-site/guide/markdown.md'));
+    assert(Sys::isFile('ecobuild/test-site/llms.txt'));
+    assert(Sys::isFile('ecobuild/test-site/llms-full.txt') == false);
+    assert(Sys::isFile('ecobuild/test-site/skill/fixture/SKILL.md'));
+    assert(Sys::isFile('ecobuild/test-site/skill/fixture.zip'));
+
+    string $llms = io::readfile('ecobuild/test-site/llms.txt')->or('');
+    assert($llms->contains('## Introduction'));
+    assert($llms->find('## Introduction') < $llms->find('## Reference'));
+    assert($llms->contains('(https://fixture.dev/docs/guide/markdown.md)'));
+
+    string $html = io::readfile('ecobuild/test-site/guide/markdown/index.html')->or('');
+    assert($html->contains('<link rel="alternate" type="text/markdown" href="https://fixture.dev/docs/guide/markdown.md">'));
+    assert($html->contains('<link rel="canonical" href="https://fixture.dev/docs/guide/markdown/">'));
+
+    string $md = io::readfile('ecobuild/test-site/guide/markdown.md')->or('');
+    assert($md->contains(':::') == false);
+    assert($md->contains('> [!WARNING]'));
+
+    string $skill = io::readfile('ecobuild/test-site/skill/fixture/SKILL.md')->or('');
+    assert($skill->starts("---\nname: fixture\ndescription: \""));
+    assert($skill->contains('## Quick start'));
+}

@@ -109,6 +109,10 @@ public class Docblock
                 }
                 continue;
             }
+            if ($fence == false && ($t == '@return' || $t == '@returns')) {
+                // a bare tag says nothing, and is no prose either
+                continue;
+            }
             if ($fence == false && ($t->starts('@return ') || $t->starts('@returns '))) {
                 usize $space = $t->find(' ');
                 $d->returns = str::trim($t->sub($space + 1, $t->size() - $space - 1));
@@ -161,6 +165,8 @@ public class Docblock
             $t = $t->sub(0, $t->size() - 2);
         }
         array<string> $out = array<string>();
+        bool $measured = false;
+        usize $cut = 0;
         foreach (str::split($t, "\n")->owned() as $line) {
             string $l = str::ltrim($line);
             if ($l->starts('*')) {
@@ -170,7 +176,11 @@ public class Docblock
                 }
             } else {
                 // a starless docblock keeps its own indent, minus what the first line had
-                $l = $line->clone();
+                if ($measured == false && Lines::blank($line) == false) {
+                    $cut = Lines::indent($line);
+                    $measured = true;
+                }
+                $l = Lines::dedent($line, $cut);
             }
             $out->push(str::rtrim($l));
         }

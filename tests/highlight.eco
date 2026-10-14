@@ -1,0 +1,211 @@
+use ecodoc::hl::{EchoLexer, Highlight, Lang, Spans};
+
+#[group: "highlight"]
+test lang_named
+{
+    assert(Lang::named('echo') == Lang::eco);
+    assert(Lang::named('ECO') == Lang::eco);
+    assert(Lang::named('ZSH') == Lang::shell);
+    assert(Lang::named('console') == Lang::shell);
+    assert(Lang::named('jsonc') == Lang::json);
+    assert(Lang::named('json5') == Lang::json);
+    assert(Lang::named('text') == Lang::plain);
+    assert(Lang::named('') == Lang::plain);
+}
+
+#[group: "highlight"]
+test spans_split_at_line_breaks
+{
+    Spans $s = Spans();
+    $s->add('k', "a\nb");
+    $s->add('', "\n");
+    $s->add('s', '<&>');
+    array<string> $lines = $s->done();
+    assert($lines->count() == 3);
+    assert($lines[0] == '<span class="k">a</span>');
+    assert($lines[1] == '<span class="k">b</span>');
+    assert($lines[2] == '<span class="s">&lt;&amp;&gt;</span>');
+}
+
+#[group: "highlight"]
+test spans_empty_after_done
+{
+    Spans $s = Spans();
+    $s->add('k', "x\ny");
+    array<string> $first = $s->done();
+    assert($first->count() == 2);
+    // done() hands the lines over, a second call starts from nothing
+    array<string> $second = $s->done();
+    assert($second->count() == 1);
+    assert($second[0] == '');
+}
+
+#[group: "highlight"]
+test plain_only_escapes
+{
+    array<string> $lines = Highlight::lines(.plain, "<a>\n&\n");
+    assert($lines->count() == 3);
+    assert($lines[0] == '&lt;a&gt;');
+    assert($lines[1] == '&amp;');
+    assert($lines[2] == '');
+    array<string> $empty = Highlight::lines(.plain, '');
+    assert($empty->count() == 1);
+    assert($empty[0] == '');
+}
+
+#[group: "highlight"]
+test echo_tokens
+{
+    array<string> $l = Highlight::lines(.eco, 'echo $n; // twice');
+    assert($l->count() == 1);
+    assert($l[0] == '<span class="k">echo</span> <span class="v">$n</span><span class="p">;</span> <span class="c">// twice</span>');
+    array<string> $t = Highlight::lines(.eco, 'array<int32> Foo MAX_N std::io f(x)');
+    assert($t[0] == '<span class="t">array</span><span class="p">&lt;</span><span class="t">int32</span><span class="p">&gt;</span> <span class="t">Foo</span> <span class="n">MAX_N</span> <span class="t">std</span><span class="p">::</span>io <span class="f">f</span><span class="p">(</span>x<span class="p">)</span>');
+}
+
+#[group: "highlight"]
+test echo_contextual_keywords
+{
+    array<string> $l = Highlight::lines(.eco, 'init init()');
+    assert($l[0] == '<span class="k">init</span> <span class="f">init</span><span class="p">(</span><span class="p">)</span>');
+}
+
+#[group: "highlight"]
+test echo_numbers_and_ranges
+{
+    array<string> $l = Highlight::lines(.eco, '1..3 1.5 0xFF');
+    assert($l[0] == '<span class="n">1</span><span class="p">..</span><span class="n">3</span> <span class="n">1.5</span> <span class="n">0xFF</span>');
+}
+
+#[group: "highlight"]
+test echo_strings_and_escapes
+{
+    array<string> $l = Highlight::lines(.eco, "'it\\'s' 'b'");
+    assert($l[0] == "<span class=\"s\">'it\\'s'</span> <span class=\"s\">'b'</span>");
+    array<string> $holes = Highlight::lines(.eco, '"a {$x} b"');
+    assert($holes[0] == '<span class="s">&quot;a </span><span class="p">{</span><span class="v">$x</span><span class="p">}</span><span class="s"> b&quot;</span>');
+    // an escaped brace opens no hole
+    array<string> $esc = Highlight::lines(.eco, '"\\{$x}"');
+    assert($esc[0] == '<span class="s">&quot;\\{$x}&quot;</span>');
+}
+
+#[group: "highlight"]
+test echo_unclosed_constructs_run_to_the_end
+{
+    array<string> $s = Highlight::lines(.eco, '"unclosed {$x');
+    assert($s[0] == '<span class="s">&quot;unclosed {$x</span>');
+    array<string> $bs = Highlight::lines(.eco, '"x\\');
+    assert($bs[0] == '<span class="s">&quot;x\\</span>');
+    array<string> $a = Highlight::lines(.eco, "'a\\");
+    assert($a[0] == "<span class=\"s\">'a\\</span>");
+    array<string> $c = Highlight::lines(.eco, '/*');
+    assert($c[0] == '<span class="c">/*</span>');
+    array<string> $c2 = Highlight::lines(.eco, '/*/ x');
+    assert($c2[0] == '<span class="c">/*/ x</span>');
+    array<string> $at = Highlight::lines(.eco, '#[a');
+    assert($at[0] == '<span class="a">#[a</span>');
+}
+
+#[group: "highlight"]
+test echo_block_comment_spans_lines
+{
+    array<string> $l = Highlight::lines(.eco, "/* a\nb */ x");
+    assert($l->count() == 2);
+    assert($l[0] == '<span class="c">/* a</span>');
+    assert($l[1] == '<span class="c">b */</span> x');
+}
+
+#[group: "highlight"]
+test echo_attributes
+{
+    array<string> $l = Highlight::lines(.eco, '#[group: "a]b"] test t');
+    assert($l[0] == '<span class="a">#[group: &quot;a]b&quot;]</span> <span class="k">test</span> t');
+    // an attribute stops at the end of its line
+    array<string> $open = Highlight::lines(.eco, "#[a\nx");
+    assert($open[0] == '<span class="a">#[a</span>');
+    assert($open[1] == 'x');
+}
+
+#[group: "highlight"]
+test echo_lone_bytes_and_utf8
+{
+    array<string> $l = Highlight::lines(.eco, '$ é $é / #');
+    assert($l[0] == '<span class="p">$</span> é <span class="v">$é</span> <span class="p">/</span> <span class="p">#</span>');
+    array<string> $empty = Highlight::lines(.eco, '');
+    assert($empty->count() == 1);
+    assert($empty[0] == '');
+    array<string> $trail = Highlight::lines(.eco, "a\n");
+    assert($trail->count() == 2);
+    assert($trail[1] == '');
+}
+
+#[group: "highlight"]
+test echo_lexer_helpers
+{
+    assert(EchoLexer::keyword('guard'));
+    assert(EchoLexer::keyword('Guard') == false);
+    assert(EchoLexer::primitive('usize'));
+    assert(EchoLexer::primitive('Usize') == false);
+    assert(EchoLexer::lineEnd("ab\ncd", 0) == 2);
+    assert(EchoLexer::lineEnd("ab\ncd", 3) == 5);
+    assert(EchoLexer::lineEnd('', 0) == 0);
+    assert(EchoLexer::stringEnd("'ab'c", 0, 39) == 4);
+    assert(EchoLexer::stringEnd("'a\\'b'", 0, 39) == 6);
+    assert(EchoLexer::stringEnd("'ab", 0, 39) == 3);
+    assert(EchoLexer::stringEnd("'", 0, 39) == 1);
+}
+
+#[group: "highlight"]
+test shell_prompt_command_and_flags
+{
+    array<string> $l = Highlight::lines(.shell, '$ ecodoc build --out dist # go');
+    assert($l[0] == '<span class="p">$</span> <span class="f">ecodoc</span> build <span class="k">--out</span> dist <span class="c"># go</span>');
+}
+
+#[group: "highlight"]
+test shell_pipes_vars_and_assignments
+{
+    array<string> $l = Highlight::lines(.shell, "FOO=1 cmd 'a b' | grep -v x && echo $HOME\n$ next");
+    assert($l->count() == 2);
+    string $want = "FOO=1 <span class=\"f\">cmd</span> <span class=\"s\">'a b'</span>";
+    $want->append(' <span class="p">|</span> <span class="f">grep</span> <span class="k">-v</span> x <span class="p">&amp;&amp;</span>');
+    $want->append(' <span class="f">echo</span> <span class="v">$HOME</span>');
+    assert($l[0] == $want);
+    assert($l[1] == '<span class="p">$</span> <span class="f">next</span>');
+}
+
+#[group: "highlight"]
+test shell_hash_inside_a_word_is_no_comment
+{
+    array<string> $l = Highlight::lines(.shell, 'a#b "unclosed');
+    assert($l[0] == '<span class="f">a#b</span> <span class="s">&quot;unclosed</span>');
+    array<string> $empty = Highlight::lines(.shell, '');
+    assert($empty->count() == 1);
+    assert($empty[0] == '');
+}
+
+#[group: "highlight"]
+test json_keys_values_and_literals
+{
+    array<string> $l = Highlight::lines(.json, '{"k": "v", "n": -1.5e+3, "b": true, "u": null} // c');
+    assert($l[0] == '<span class="p">{</span><span class="t">&quot;k&quot;</span><span class="p">:</span> <span class="s">&quot;v&quot;</span><span class="p">,</span> <span class="t">&quot;n&quot;</span><span class="p">:</span> <span class="n">-1.5e+3</span><span class="p">,</span> <span class="t">&quot;b&quot;</span><span class="p">:</span> <span class="k">true</span><span class="p">,</span> <span class="t">&quot;u&quot;</span><span class="p">:</span> <span class="k">null</span><span class="p">}</span> <span class="c">// c</span>');
+}
+
+#[group: "highlight"]
+test json_tolerates_trailing_commas_and_space_before_colon
+{
+    array<string> $l = Highlight::lines(.json, '{"k" : [1, 2,],}');
+    assert($l[0] == '<span class="p">{</span><span class="t">&quot;k&quot;</span> <span class="p">:</span> <span class="p">[</span><span class="n">1</span><span class="p">,</span> <span class="n">2</span><span class="p">,</span><span class="p">]</span><span class="p">,</span><span class="p">}</span>');
+}
+
+#[group: "highlight"]
+test json_unterminated_and_utf8
+{
+    array<string> $u = Highlight::lines(.json, '"unterminated');
+    assert($u[0] == '<span class="s">&quot;unterminated</span>');
+    array<string> $l = Highlight::lines(.json, '"é": "ü"');
+    assert($l[0] == '<span class="t">&quot;é&quot;</span><span class="p">:</span> <span class="s">&quot;ü&quot;</span>');
+    array<string> $key = Highlight::lines(.json, "{\n  \"k\"\n  : 1\n}");
+    assert($key->count() == 4);
+    assert($key[1] == '  <span class="t">&quot;k&quot;</span>');
+}

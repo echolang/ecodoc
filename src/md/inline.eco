@@ -44,6 +44,11 @@ internal struct LinkTail
     public string $href = '';
     public string $title = '';
     public usize $end = 0;
+
+    /**
+     * The text between the brackets, as written.
+     */
+    public string $label = '';
 }
 
 /**
@@ -78,6 +83,12 @@ public struct Inline
      * Resolves link destinations: page paths, `api:` symbols, the site base.
      */
     public Links $links;
+
+    /**
+     * Rendering the text of a link, where a bare URL stays text: a link
+     * inside a link is not HTML.
+     */
+    private bool $inLink = false;
 
     /**
      * The HTML of `$src`, the inline text of one block.
@@ -197,7 +208,7 @@ public struct Inline
             }
 
             // a bare https:// URL becomes a link
-            if ($b == 104 && Inline::bareUrlAt($src, $i)) {
+            if ($b == 104 && $this->inLink == false && Inline::bareUrlAt($src, $i)) {
                 usize $end = Inline::bareUrlEnd($src, $i);
                 string $url = $src->sub($i, $end - $i);
                 string $safe = Html::escape($url);
@@ -230,7 +241,7 @@ public struct Inline
      * The index of a run of exactly `$run` backticks at or after `$from`,
      * or the size of `$src` when the span never closes.
      */
-    private static function closingTicks(const string& $src, usize $from, usize $run) : usize
+    internal static function closingTicks(const string& $src, usize $from, usize $run) : usize
     {
         usize $i = $from;
         while ($i < $src->size()) {
@@ -407,50 +418,17 @@ public struct Inline
      */
     private function link(const string& $src, usize $at, bool $image, string& $buf) : usize
     {
-        usize $close = Inline::closingBracket($src, $at);
-        if ($close >= $src->size()) {
+        LinkTail $tail = Inline::target($this->doc, $src, $at);
+        if ($tail->found == false) {
             return 0;
         }
-        string $label = $src->sub($at + 1, $close - $at - 1);
-        LinkTail $tail = LinkTail();
+        string $label = $tail->label;
 
-        if ($close + 1 < $src->size() && $src->byte($close + 1) == ch::LPAREN) {
-            $tail = Inline::destination($src, $close + 2);
-        }
-        if ($tail->found == false && $close + 1 < $src->size() && $src->byte($close + 1) == ch::LBRACKET) {
-            usize $refEnd = $src->find(']', $close + 2);
-            if ($refEnd < $src->size()) {
-                string $name = $src->sub($close + 2, $refEnd - $close - 2);
-                if ($name->empty()) {
-                    $name = $label->clone();
-                }
-                string $key = Document::label($name);
-                if ($this->doc->refs->has($key)) {
-                    LinkRef $ref = $this->doc->refs->get($key);
-                    $tail->found = true;
-                    $tail->href = $ref->href;
-                    $tail->title = $ref->title;
-                    $tail->end = $refEnd + 1;
-                }
-            }
-        }
-        if ($tail->found == false) {
-            string $key = Document::label($label);
-            if ($key->empty() || $this->doc->refs->has($key) == false) {
-                return 0;
-            }
-            LinkRef $ref = $this->doc->refs->get($key);
-            $tail->found = true;
-            $tail->href = $ref->href;
-            $tail->title = $ref->title;
-            $tail->end = $close + 1;
-        }
-
-        string $raw = str::trim($tail->href);
+        string $raw = Inline::unescape(str::trim($tail->href));
         string $href = Html::escape($this->links->href($raw));
         string $title = '';
         if ($tail->title->empty() == false) {
-            string $t = Html::escape($tail->title);
+            string $t = Html::escape(Inline::unescape($tail->title));
             $title = " title=\"{$t}\"";
         }
 
@@ -465,7 +443,10 @@ public struct Inline
             string $name = Html::escape($this->links->label($raw->sub(4, $raw->size() - 4)));
             $inner = "<code>{$name}</code>";
         } else {
+            bool $outer = $this->inLink;
+            $this->inLink = true;
             $inner = $this->render($label);
+            $this->inLink = $outer;
         }
         if ($href->empty()) {
             $buf->append($inner);
@@ -477,6 +458,79 @@ public struct Inline
         }
         $buf->append("<a href=\"{$href}\"{$title}{$extra}>{$inner}</a>");
         return $tail->end - $at;
+    }
+
+    /**
+     * `$s` without the backslash of each escaped punctuation byte, as a
+     * destination or title means it: `a\)b` is `a)b`.
+     */
+    private static function unescape(const string& $s) : string
+    {
+        string $out = '';
+        usize $i = 0;
+        while ($i < $s->size()) {
+            uint8 $b = $s->byte($i);
+            if ($b == ch::BACKSLASH && $i + 1 < $s->size() && Ascii::punct($s->byte($i + 1))) {
+                $out->push($s->byte($i + 1));
+                $i = $i + 2;
+                continue;
+            }
+            $out->push($b);
+            $i = $i + 1;
+        }
+        return $out;
+    }
+
+    /**
+     * The link whose `[` is at `$at`: its label, and its destination written
+     * inline, `[a][ref]`, or as a bare `[ref]`. `found` is false when the
+     * brackets are only brackets. `end` is just past the link.
+     *
+     * The HTML and the Markdown twin both read links through this, so the
+     * two can never disagree on what a link is.
+     */
+    internal static function target(const Document& $doc, const string& $src, usize $at) : LinkTail
+    {
+        LinkTail $tail = LinkTail();
+        usize $close = Inline::closingBracket($src, $at);
+        if ($close >= $src->size()) {
+            return $tail;
+        }
+        string $label = $src->sub($at + 1, $close - $at - 1);
+
+        if ($close + 1 < $src->size() && $src->byte($close + 1) == ch::LPAREN) {
+            $tail = Inline::destination($src, $close + 2);
+        }
+        if ($tail->found == false && $close + 1 < $src->size() && $src->byte($close + 1) == ch::LBRACKET) {
+            usize $refEnd = $src->find(']', $close + 2);
+            if ($refEnd < $src->size()) {
+                string $name = $src->sub($close + 2, $refEnd - $close - 2);
+                if ($name->empty()) {
+                    $name = $label->clone();
+                }
+                string $key = Document::label($name);
+                if ($doc->refs->has($key)) {
+                    LinkRef $ref = $doc->refs->get($key);
+                    $tail->found = true;
+                    $tail->href = $ref->href;
+                    $tail->title = $ref->title;
+                    $tail->end = $refEnd + 1;
+                }
+            }
+        }
+        if ($tail->found == false) {
+            string $key = Document::label($label);
+            if ($key->empty() || $doc->refs->has($key) == false) {
+                return $tail;
+            }
+            LinkRef $ref = $doc->refs->get($key);
+            $tail->found = true;
+            $tail->href = $ref->href;
+            $tail->title = $ref->title;
+            $tail->end = $close + 1;
+        }
+        $tail->label = $label;
+        return $tail;
     }
 
     /**

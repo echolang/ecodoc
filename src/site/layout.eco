@@ -125,6 +125,16 @@ public struct Layout
         }
         $out->append("<meta property=\"og:title\" content=\"{$title}\">\n");
         $out->append("<meta name=\"generator\" content=\"ecodoc\">\n");
+        // where an agent finds the same page without the chrome
+        if ($view->markdown->empty() == false) {
+            string $twin = Html::escape($links->twin($view->url));
+            $out->append("<link rel=\"alternate\" type=\"text/markdown\" href=\"{$twin}\">\n");
+        }
+        // a page has a canonical URL; a file like 404.html does not
+        if ($links->origin->empty() == false && Route::markdown($view->url)->empty() == false) {
+            string $canonical = Html::escape($links->absolute($view->url));
+            $out->append("<link rel=\"canonical\" href=\"{$canonical}\">\n");
+        }
         // the theme is settled before the first paint, so a light reader never sees the dark page flash
         string $default = Html::escape($site->theme);
         $out->append('<script>(function(){var d="');

@@ -1,0 +1,125 @@
+namespace ecodoc::sys;
+
+/**
+ * A zip archive built in memory, files stored as they are.
+ *
+ * ```echo
+ * Zip $z = Zip();
+ * $z->add('skill/SKILL.md', "---\nname: skill\n---\n");
+ * $z->add('skill/references/api.md', '# API');
+ * guard io::writefile('skill.zip', $z->bytes()) else { die('no'); };
+ * echo Zip::crc32('123456789');  // 3421780262
+ * ```
+ *
+ * Stored, not deflated: the files are a few hundred KB of Markdown and the
+ * archive is only there because claude.ai takes a skill as a zip upload.
+ * Every entry carries the same date, 1980-01-01, so the same docs give the
+ * same bytes on every build.
+ */
+public class Zip
+{
+    private string $body = '';
+    private string $central = '';
+    private uint16 $count = 0;
+
+    /**
+     * Add a file at `$path`, forward slashes, no leading `/`.
+     */
+    public function add(const string& $path, const string& $bytes) : void
+    {
+        uint32 $crc = Zip::crc32($bytes);
+        uint32 $size = $bytes->size() as uint32;
+        uint32 $offset = $this->body->size() as uint32;
+        uint16 $name = $path->size() as uint16;
+
+        // the local header, then the file
+        Zip::u32($this->body, 0x04034b50);
+        Zip::fields($this->body, $crc, $size, $name);
+        Zip::u16($this->body, 0);
+        $this->body->append($path);
+        $this->body->append($bytes);
+
+        // its entry in the directory at the end
+        Zip::u32($this->central, 0x02014b50);
+        Zip::u16($this->central, 0x0314);
+        Zip::fields($this->central, $crc, $size, $name);
+        Zip::u16($this->central, 0);
+        Zip::u16($this->central, 0);
+        Zip::u16($this->central, 0);
+        Zip::u16($this->central, 0);
+        // a regular file, rw-r--r--
+        Zip::u32($this->central, 0x81a40000);
+        Zip::u32($this->central, $offset);
+        $this->central->append($path);
+        $this->count = $this->count + 1;
+    }
+
+    /**
+     * What the local header and the directory entry both say about a file,
+     * in the same order: version 2.0, UTF-8 names, stored, the 1980 epoch,
+     * then its CRC, sizes and name length.
+     */
+    private static function fields(string& $out, uint32 $crc, uint32 $size, uint16 $name) : void
+    {
+        Zip::u16($out, 20);
+        Zip::u16($out, 0x0800);
+        Zip::u16($out, 0);
+        Zip::u16($out, 0);
+        Zip::u16($out, 0x0021);
+        Zip::u32($out, $crc);
+        Zip::u32($out, $size);
+        Zip::u32($out, $size);
+        Zip::u16($out, $name);
+    }
+
+    /**
+     * The whole archive: the files, the directory, and the record that finds it.
+     */
+    public const function bytes() : string
+    {
+        string $out = $this->body->clone();
+        $out->append($this->central);
+        Zip::u32($out, 0x06054b50);
+        Zip::u16($out, 0);
+        Zip::u16($out, 0);
+        Zip::u16($out, $this->count);
+        Zip::u16($out, $this->count);
+        Zip::u32($out, $this->central->size() as uint32);
+        Zip::u32($out, $this->body->size() as uint32);
+        Zip::u16($out, 0);
+        return $out;
+    }
+
+    /**
+     * The CRC-32 of `$bytes`, the checksum zip stores for every file.
+     */
+    public static function crc32(const string& $bytes) : uint32
+    {
+        uint32 $crc = 0xFFFFFFFF;
+        for (usize $i = 0; $i < $bytes->size(); $i++) {
+            $crc = $crc ^ ($bytes->byte($i) as uint32);
+            for (int32 $k = 0; $k < 8; $k++) {
+                if (($crc & 1) == 1) {
+                    $crc = ($crc >> 1) ^ 0xEDB88320;
+                } else {
+                    $crc = $crc >> 1;
+                }
+            }
+        }
+        return $crc ^ 0xFFFFFFFF;
+    }
+
+    private static function u16(string& $out, uint16 $v) : void
+    {
+        $out->push(($v & 0xFF) as uint8);
+        $out->push(($v >> 8) as uint8);
+    }
+
+    private static function u32(string& $out, uint32 $v) : void
+    {
+        $out->push(($v & 0xFF) as uint8);
+        $out->push((($v >> 8) & 0xFF) as uint8);
+        $out->push((($v >> 16) & 0xFF) as uint8);
+        $out->push(($v >> 24) as uint8);
+    }
+}

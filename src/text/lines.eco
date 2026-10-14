@@ -95,6 +95,14 @@ public struct Lines
     }
 
     /**
+     * `$text` trimmed, its line breaks as spaces, for a list item or a description.
+     */
+    public static function oneLine(const string& $text) : string
+    {
+        return str::join(str::split(str::trim($text), "\n")->owned(), ' ');
+    }
+
+    /**
      * `$line` without up to `$n` leading spaces.
      */
     public static function dedent(const string& $line, usize $n) : string

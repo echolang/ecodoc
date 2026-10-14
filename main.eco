@@ -17,12 +17,15 @@ command::Arg $docs = $app->arg('docs', 'd', '<dir>', 'docs folder, ./docs by def
 command::Arg $out = $app->arg('out', 'o', '<dir>', 'output directory, <docs>/dist by default');
 command::Arg $echoc = $app->arg('echoc', '', '<path>', 'the compiler, $ECHOC or echoc on PATH');
 command::Arg $base = $app->arg('base', '', '<path>', 'path to serve under, overriding #[docs::base:]');
+command::Arg $url = $app->arg('url', '', '<url>', 'where the site is published, overriding #[docs::url:]');
 command::Arg $port = $app->arg('port', 'p', '<n>', 'listen port, 3246 for dev and 6423 for serve');
 command::Flag $strict = $app->flag('strict', '', 'fail on a dead link or an unresolved symbol');
 
 $app->accept($out, $build);
 $app->accept($out, $dev);
 $app->accept($base, $build);
+$app->accept($url, $build);
+$app->accept($url, $serve);
 $app->accept($strict, $build);
 $app->accept($port, $dev);
 $app->accept($out, $serve);
@@ -68,6 +71,9 @@ if ($parsed->stated($out)) {
 if ($parsed->stated($base)) {
     $builder->base = $parsed->value($base);
 }
+if ($parsed->stated($url)) {
+    $builder->url = $parsed->value($url);
+}
 $builder->strict = $parsed->stated($strict);
 
 if ($subject == 'init') {
@@ -103,6 +109,7 @@ if ($subject == 'build' || $subject == 'serve') {
 
 if ($subject == 'dev') {
     $builder->base = '/';
+    $builder->local = true;
     guard ecodoc::cli::Dev::run($builder, $listen as int32) else ($e) {
         io::eprintln("ecodoc: {$e->message()}");
         env::exit(1);

@@ -13,6 +13,7 @@ use ecodoc::sys::Path;
  * echo Route::file('/cli/');         // cli/index.html
  * echo Route::link('cli.md#flags');  // /cli/#flags
  * echo Route::link('/api');          // /api/
+ * echo Route::markdown('/cli/');     // cli.md
  * ```
  *
  * The trailing slash is the whole trick. `/guide/intro/` is a directory to
@@ -62,6 +63,43 @@ public struct Route
     }
 
     /**
+     * The output file of the Markdown twin of the page at `$url`: `/` is
+     * `index.md`, `/guide/intro/` is `guide/intro.md`, `/guide/` is
+     * `guide.md`. Strip the slash, add `.md`: the rule llms.txt suggests, and
+     * one an agent can guess from any page URL. Empty for a URL that names a
+     * file, like `/404.html`, which has no twin.
+     */
+    public static function markdown(const string& $url) : string
+    {
+        string $path = Route::path($url);
+        if ($path->starts('/')) {
+            $path = $path->sub(1, $path->size() - 1);
+        }
+        if ($path->empty()) {
+            return 'index.md';
+        }
+        if ($path->ends('/')) {
+            return "{$path->sub(0, $path->size() - 1)}.md";
+        }
+        if (Path::ext($path)->empty()) {
+            return "{$path}.md";
+        }
+        return '';
+    }
+
+    /**
+     * `$url` without its `#hash`: `/guide/intro/` for `/guide/intro/#top`.
+     */
+    public static function path(const string& $url) : string
+    {
+        usize $hash = $url->find('#');
+        if ($hash < $url->size()) {
+            return $url->sub(0, $hash);
+        }
+        return $url->clone();
+    }
+
+    /**
      * A link written in the manifest, in the form page URLs take: rooted,
      * without `.md` or `.html`, and ending in `/` unless it names a file or
      * carries a hash. External links stay as written.
@@ -69,7 +107,7 @@ public struct Route
     public static function link(const string& $raw) : string
     {
         string $link = str::trim($raw);
-        if ($link->empty() || Links::external($link) || $link->starts('mailto:')) {
+        if ($link->empty() || Links::external($link) || $link->starts('mailto:') || $link->starts('tel:')) {
             return $link;
         }
         string $hash = '';
@@ -77,6 +115,12 @@ public struct Route
         if ($at < $link->size()) {
             $hash = $link->sub($at, $link->size() - $at);
             $link = $link->sub(0, $at);
+        }
+        // the query goes back on after the slash, like the hash
+        usize $q = $link->find('?');
+        if ($q < $link->size()) {
+            $hash = "{$link->sub($q, $link->size() - $q)}{$hash}";
+            $link = $link->sub(0, $q);
         }
         if ($link->starts('/') == false) {
             $link = "/{$link}";

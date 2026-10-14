@@ -1,0 +1,556 @@
+/*
+ * Blocks back to Markdown, for agents. The twin of a page says what the HTML
+ * says, in plain CommonMark and GitHub alerts, with every link resolved.
+ */
+
+namespace ecodoc::md;
+
+use ecodoc::site::Links;
+use ecodoc::text::{Html, Lines};
+use ecodoc::text::ch;
+
+/**
+ * Inline Markdown with every link destination resolved and the rest kept
+ * byte for byte as written.
+ *
+ * ```echo
+ * Links $l = Links();
+ * $l->page = 'guide/a.md';
+ * $l->pages['guide/b.md'] = '/guide/b/';
+ * $l->twins['/guide/b/'] = true;
+ * Relink $r = Relink(Document(), $l);
+ * echo $r->text('See [b](./b.md#top), *now*.');
+ * // See [b](/guide/b.md#top), *now*.
+ * ```
+ *
+ * Emphasis, entities and line breaks mean the same in every Markdown reader,
+ * so they stay as written. Only a destination needs ecodoc to make sense of
+ * it: `./b.md`, `api:json::Value` and `[ref]` mean nothing anywhere else.
+ * Code spans and escapes are copied untouched, so a `[a](b)` inside
+ * backticks stays an example.
+ */
+public struct Relink
+{
+    /**
+     * The document the text belongs to, for its `[label]: url` references.
+     */
+    public Document $doc;
+
+    /**
+     * Resolves destinations, pages as their twins.
+     */
+    public Links $links;
+
+    /**
+     * Write a link to another page of the site as its text alone, for prose
+     * that ends up in a code comment where a URL is only noise. A symbol
+     * link becomes its name in backticks; links off the site stay links.
+     */
+    public bool $bare = false;
+
+    /**
+     * `$src` with its links resolved. A reference link comes out inline,
+     * because the definitions it named are not written back.
+     */
+    public function text(const string& $src) : string
+    {
+        string $out = '';
+        usize $n = $src->size();
+        usize $i = 0;
+        while ($i < $n) {
+            uint8 $b = $src->byte($i);
+            if ($b == ch::BACKSLASH && $i + 1 < $n) {
+                $out->append($src->sub($i, 2));
+                $i = $i + 2;
+                continue;
+            }
+            if ($b == ch::BACKTICK) {
+                usize $run = Lines::run($src, $i, ch::BACKTICK);
+                usize $close = Inline::closingTicks($src, $i + $run, $run);
+                if ($close < $n) {
+                    $out->append($src->sub($i, $close + $run - $i));
+                    $i = $close + $run;
+                    continue;
+                }
+                $out->append($src->sub($i, $run));
+                $i = $i + $run;
+                continue;
+            }
+            if ($b == ch::BANG && $i + 1 < $n && $src->byte($i + 1) == ch::LBRACKET) {
+                usize $used = $this->link($src, $i + 1, true, $out);
+                if ($used > 0) {
+                    $i = $i + 1 + $used;
+                    continue;
+                }
+                $out->push($b);
+                $i = $i + 1;
+                continue;
+            }
+            if ($b == ch::LBRACKET) {
+                usize $used = $this->link($src, $i, false, $out);
+                if ($used > 0) {
+                    $i = $i + $used;
+                    continue;
+                }
+            }
+            $out->push($b);
+            $i = $i + 1;
+        }
+        return $out;
+    }
+
+    /**
+     * The link whose `[` is at `$at`, written onto `$out` with its destination
+     * resolved. The bytes used, or 0 when it is not a link.
+     */
+    private function link(const string& $src, usize $at, bool $image, string& $out) : usize
+    {
+        LinkTail $tail = Inline::target($this->doc, $src, $at);
+        if ($tail->found == false) {
+            return 0;
+        }
+        string $raw = str::trim($tail->href);
+        if ($this->bare && Links::external($raw) == false) {
+            if ($raw->starts('api:') && ($tail->label->empty() || $image)) {
+                string $name = $this->links->label($raw->sub(4, $raw->size() - 4));
+                $out->append("`{$name}`");
+            } else {
+                $out->append($this->text($tail->label));
+            }
+            return $tail->end - $at;
+        }
+        string $href = $this->links->twinHref($raw);
+        string $label = '';
+        if ($image == false && $tail->label->empty() && $raw->starts('api:')) {
+            string $name = $this->links->label($raw->sub(4, $raw->size() - 4));
+            $label = "`{$name}`";
+        } else {
+            $label = $this->text($tail->label);
+        }
+        usize $used = $tail->end - $at;
+        // a symbol that does not resolve is its label, as in the HTML
+        if ($href->empty()) {
+            $out->append($label);
+            return $used;
+        }
+        if ($image) {
+            $out->push(ch::BANG);
+        }
+        $out->append("[{$label}](");
+        $out->append(Relink::destination($href, $tail->title));
+        $out->append(')');
+        return $used;
+    }
+
+    /**
+     * What goes between the parentheses: the href, in `<...>` when a space
+     * or an unbalanced paren would end it early, and the title in quotes.
+     */
+    public static function destination(const string& $href, const string& $title) : string
+    {
+        string $out = '';
+        int32 $depth = 0;
+        bool $wrap = $href->contains(' ');
+        for (usize $i = 0; $i < $href->size(); $i++) {
+            uint8 $b = $href->byte($i);
+            if ($b == ch::LPAREN) {
+                $depth = $depth + 1;
+            } else if ($b == ch::RPAREN) {
+                $depth = $depth - 1;
+                if ($depth < 0) {
+                    $wrap = true;
+                }
+            }
+        }
+        if ($depth != 0) {
+            $wrap = true;
+        }
+        if ($wrap) {
+            $out->append("<{$href}>");
+        } else {
+            $out->append($href);
+        }
+        if ($title->empty() == false) {
+            $out->append(' "');
+            for (usize $i = 0; $i < $title->size(); $i++) {
+                uint8 $b = $title->byte($i);
+                if ($b == ch::QUOTE && ($i == 0 || $title->byte($i - 1) != ch::BACKSLASH)) {
+                    $out->push(ch::BACKSLASH);
+                }
+                $out->push($b);
+            }
+            $out->push(ch::QUOTE);
+        }
+        return $out;
+    }
+}
+
+/**
+ * A parsed document written back as plain CommonMark with GitHub's
+ * tables and alerts: the Markdown twin of a page, for agents.
+ *
+ * ```echo
+ * Links $l = Links();
+ * Markdown $m = Markdown($l);
+ * echo $m->document(Document::parse("::: tip Heads up\nRead *this*.\n:::", 1));
+ * // > [!TIP]
+ * // > **Heads up**
+ * // >
+ * // > Read *this*.
+ * ```
+ *
+ * What only ecodoc understands is turned into what every reader does. A
+ * `::: tip` is a `> [!TIP]`, a fence keeps its language and file name but
+ * not its marked lines, and a `{#id}` stays only where it was written. The
+ * `echo $x;  // 42` comments of an Echo example are left alone: to an agent
+ * that comment is exactly what the program prints.
+ *
+ * Setext headings come back as `#`, indented code as a fence, and
+ * reference links inline. The page reads the same; only the spelling changed.
+ */
+public class Markdown
+{
+    /**
+     * Resolves link destinations, pages as their twins.
+     */
+    public Links $links;
+
+    /**
+     * Links to the site's own pages written as their text alone. See `Relink::$bare`.
+     */
+    public bool $bare = false;
+
+    /**
+     * A writer resolving against `$links`.
+     */
+    constructor(Links $links)
+    {
+        $this->links = $links;
+    }
+
+    /**
+     * The whole document as Markdown, ending in one newline.
+     */
+    public function document(const Document& $doc) : string
+    {
+        string $out = str::join($this->parts($doc), "\n\n");
+        if ($out->empty() == false) {
+            $out->append("\n");
+        }
+        return $out;
+    }
+
+    /**
+     * Each top-level block as Markdown, blocks that write nothing left out.
+     * For a caller that slips something in after the title.
+     */
+    public function parts(const Document& $doc) : array<string>
+    {
+        Relink $relink = Relink($doc, $this->links);
+        $relink->bare = $this->bare;
+        return $this->blocks($doc->blocks, $relink);
+    }
+
+    /**
+     * A code fence: just the language and the file name, the body as is.
+     * The fence grows past any run of backticks inside the body.
+     *
+     * ```echo
+     * echo Markdown::fence('echo [a.eco] {1,3}', 'echo 1;');
+     * // ```echo title="a.eco"
+     * // echo 1;
+     * // ```
+     * ```
+     */
+    public static function fence(const string& $info, const string& $code) : string
+    {
+        Fence $f = Fence::read($info);
+        string $head = $f->lang->clone();
+        if ($f->title->empty() == false) {
+            if ($head->empty()) {
+                $head = 'txt';
+            }
+            $head->append(" title=\"{$f->title}\"");
+        }
+        usize $longest = 0;
+        usize $i = 0;
+        while ($i < $code->size()) {
+            if ($code->byte($i) == ch::BACKTICK) {
+                usize $run = Lines::run($code, $i, ch::BACKTICK);
+                if ($run > $longest) {
+                    $longest = $run;
+                }
+                $i = $i + $run;
+                continue;
+            }
+            $i = $i + 1;
+        }
+        string $ticks = '```';
+        while ($ticks->size() <= $longest) {
+            $ticks->push(ch::BACKTICK);
+        }
+        if ($code->empty()) {
+            return "{$ticks}{$head}\n{$ticks}";
+        }
+        return "{$ticks}{$head}\n{$code}\n{$ticks}";
+    }
+
+    /**
+     * The GitHub alert a container or alert of `$kind` becomes: `TIP` for
+     * `tip`, `NOTE` for `info`, `CAUTION` for `danger` and `compile`.
+     */
+    public static function alert(const string& $kind) : string
+    {
+        if ($kind == 'tip') {
+            return 'TIP';
+        }
+        if ($kind == 'important') {
+            return 'IMPORTANT';
+        }
+        if ($kind == 'warning') {
+            return 'WARNING';
+        }
+        if ($kind == 'caution' || $kind == 'danger' || $kind == 'compile') {
+            return 'CAUTION';
+        }
+        return 'NOTE';
+    }
+
+    /**
+     * Every line of `$text` behind a prefix: `$first` on the first line,
+     * `$rest` on the others. A blank line gets `$rest` without its trailing
+     * spaces, so a quote keeps its `>` and a list item stays blank.
+     */
+    public static function prefixed(const string& $text, const string& $first, const string& $rest) : string
+    {
+        string $out = '';
+        array<string> $lines = Lines::split($text);
+        for (usize $i = 0; $i < $lines->count(); $i++) {
+            string $prefix = $rest;
+            if ($i == 0) {
+                $prefix = $first;
+            } else {
+                $out->push(ch::LF);
+            }
+            if (Lines::blank($lines[$i])) {
+                $out->append(str::rtrim($prefix));
+            } else {
+                $out->append($prefix);
+                $out->append($lines[$i]);
+            }
+        }
+        return $out;
+    }
+
+    private function blocks(const array<Block>& $blocks, Relink& $relink) : array<string>
+    {
+        array<string> $parts = array<string>();
+        foreach ($blocks as $b) {
+            string $md = $this->block($b, $relink);
+            if ($md->empty() == false) {
+                $parts->push($md);
+            }
+        }
+        return $parts;
+    }
+
+    private function block(Block $b, Relink& $relink) : string
+    {
+        $this->links->line = $b->line;
+        string $out = '';
+        match ($b->kind) {
+            .paragraph => {
+                $out = $relink->text($b->text);
+            },
+            .heading => {
+                $out = $this->heading($b, $relink);
+            },
+            .code => {
+                $out = Markdown::fence($b->info, $b->text);
+            },
+            .quote => {
+                string $inner = str::join($this->blocks($b->children, $relink), "\n\n");
+                $out = Markdown::prefixed($inner, '> ', '> ');
+            },
+            .alert => {
+                $out = $this->callout($b, $relink);
+            },
+            .list => {
+                $out = $this->list($b, $relink);
+            },
+            .item => {
+                $out = str::join($this->blocks($b->children, $relink), "\n\n");
+            },
+            .table => {
+                $out = $this->table($b, $relink);
+            },
+            .html => {
+                $out = Markdown::html($b->text);
+            },
+            .rule => {
+                $out = '---';
+            },
+            .container => {
+                $out = $this->callout($b, $relink);
+            },
+        };
+        return $out;
+    }
+
+    private function heading(Block $b, Relink& $relink) : string
+    {
+        string $out = '';
+        for (int32 $k = 0; $k < $b->level; $k++) {
+            $out->push(ch::HASH);
+        }
+        // a setext heading may span lines, an ATX one may not
+        string $text = $relink->text(Lines::oneLine($b->text));
+        if ($text->empty() == false) {
+            $out->append(" {$text}");
+        }
+        // only a hand-written id: a slug is what every reader makes of the text anyway
+        if ($b->id->empty() == false) {
+            $out->append(" {#{$b->id}}");
+        }
+        return $out;
+    }
+
+    private function callout(Block $b, Relink& $relink) : string
+    {
+        string $body = str::join($this->blocks($b->children, $relink), "\n\n");
+        string $title = '';
+        if ($b->title->empty() == false) {
+            $title = $relink->text($b->title);
+        }
+
+        // a details box is a heading in bold and what it hid, nothing hidden
+        if ($b->info == 'details') {
+            if ($title->empty()) {
+                $title = Alerts::title('details');
+            }
+            if ($body->empty()) {
+                return "**{$title}**";
+            }
+            return "**{$title}**\n\n{$body}";
+        }
+
+        if ($title->empty() && $b->info == 'compile') {
+            $title = Alerts::title('compile');
+        }
+        string $kind = Markdown::alert($b->info);
+        string $text = "[!{$kind}]";
+        if ($title->empty() == false) {
+            $text->append("\n**{$title}**");
+        }
+        if ($body->empty() == false) {
+            if ($title->empty() == false) {
+                $text->append("\n");
+            }
+            $text->append("\n{$body}");
+        }
+        return Markdown::prefixed($text, '> ', '> ');
+    }
+
+    private function list(Block $b, Relink& $relink) : string
+    {
+        string $gap = "\n\n";
+        if ($b->tight) {
+            $gap = "\n";
+        }
+        array<string> $items = array<string>();
+        int64 $n = $b->start;
+        foreach ($b->children as $item) {
+            string $marker = '- ';
+            if ($b->ordered) {
+                $marker = "{$n}. ";
+            }
+            string $indent = '';
+            while ($indent->size() < $marker->size()) {
+                $indent->push(ch::SPACE);
+            }
+            string $inner = str::join($this->blocks($item->children, $relink), $gap);
+            if ($inner->empty()) {
+                $items->push(str::rtrim($marker));
+            } else {
+                $items->push(Markdown::prefixed($inner, $marker, $indent));
+            }
+            $n = $n + 1;
+        }
+        return str::join($items, $gap);
+    }
+
+    private function table(Block $b, Relink& $relink) : string
+    {
+        if ($b->rows->empty()) {
+            return '';
+        }
+        string $out = '';
+        usize $cols = $b->rows[0]->count();
+        for (usize $r = 0; $r < $b->rows->count(); $r++) {
+            if ($r > 0) {
+                $out->push(ch::LF);
+            }
+            $out->append('|');
+            for (usize $c = 0; $c < $cols; $c++) {
+                string $cell = '';
+                if ($c < $b->rows[$r]->count()) {
+                    $cell = Markdown::cell($relink->text($b->rows[$r][$c]));
+                }
+                $out->append(" {$cell} |");
+            }
+            if ($r == 0) {
+                $out->append("\n|");
+                for (usize $c = 0; $c < $cols; $c++) {
+                    string $align = '';
+                    if ($c < $b->align->count()) {
+                        $align = $b->align[$c];
+                    }
+                    if ($align == 'left') {
+                        $out->append(':--|');
+                    } else if ($align == 'center') {
+                        $out->append(':-:|');
+                    } else if ($align == 'right') {
+                        $out->append('--:|');
+                    } else {
+                        $out->append('---|');
+                    }
+                }
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * A table cell with its pipes escaped again, code spans included, which
+     * GitHub asks for too.
+     */
+    private static function cell(const string& $text) : string
+    {
+        string $out = '';
+        for (usize $i = 0; $i < $text->size(); $i++) {
+            uint8 $b = $text->byte($i);
+            if ($b == ch::PIPE && ($i == 0 || $text->byte($i - 1) != ch::BACKSLASH)) {
+                $out->push(ch::BACKSLASH);
+            }
+            $out->push($b);
+        }
+        return $out;
+    }
+
+    /**
+     * An HTML block as written, except what an agent cannot use: scripts,
+     * styles and comments.
+     */
+    private static function html(const string& $text) : string
+    {
+        string $t = str::trim($text);
+        if ($t->starts('<!--')) {
+            return '';
+        }
+        string $tag = Html::tagName($t);
+        if ($tag == 'script' || $tag == 'style') {
+            return '';
+        }
+        return str::rtrim($text);
+    }
+}

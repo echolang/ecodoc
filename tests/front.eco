@@ -1,0 +1,145 @@
+use ecodoc::md::{Frontmatter, FrontSplit, Yaml};
+
+function front(string $src) : string
+{
+    FrontSplit $s = Frontmatter::split($src);
+    return json::dump($s->data);
+}
+
+function yaml(string $src) : string
+{
+    return json::dump(Yaml::parse(str::split($src, "\n")->owned()));
+}
+
+#[group: "front"]
+test front_none
+{
+    FrontSplit $s = Frontmatter::split('# T');
+    assert(json::dump($s->data) == '{}');
+    assert($s->body == '# T');
+    assert($s->line == 1);
+    FrontSplit $e = Frontmatter::split('');
+    assert($e->body == '' && $e->line == 1);
+}
+
+#[group: "front"]
+test front_must_open_the_page
+{
+    FrontSplit $s = Frontmatter::split("\n---\ntitle: x\n---\n# T");
+    assert(json::dump($s->data) == '{}');
+    assert($s->body == "\n---\ntitle: x\n---\n# T");
+    FrontSplit $d = Frontmatter::split('---');
+    assert($d->body == '---' && $d->line == 1);
+}
+
+#[group: "front"]
+test front_crlf
+{
+    FrontSplit $s = Frontmatter::split("---\r\ntitle: Go\r\n---\r\n# T\r\n");
+    assert(json::dump($s->data) == '{"title":"Go"}');
+    assert($s->body == "# T\n");
+    assert($s->line == 4);
+}
+
+#[group: "front"]
+test front_unclosed_is_body
+{
+    FrontSplit $s = Frontmatter::split("---\ntitle: x\n# T");
+    assert(json::dump($s->data) == '{}');
+    assert($s->body == "---\ntitle: x\n# T");
+    assert($s->line == 1);
+}
+
+#[group: "front"]
+test front_empty_block
+{
+    FrontSplit $s = Frontmatter::split("---\n---\nbody");
+    assert(json::dump($s->data) == '{}');
+    assert($s->body == 'body');
+    assert($s->line == 3);
+    FrontSplit $t = Frontmatter::split("---\na: 1\n---   \nx");
+    assert(json::dump($t->data) == '{"a":1}');
+    assert($t->line == 4);
+}
+
+#[group: "front"]
+test front_not_a_map_is_empty
+{
+    assert(front("---\n- a\n- b\n---\nx") == '{}');
+    assert(front("---\njust text\n---\nx") == '{}');
+}
+
+#[group: "front"]
+test yaml_quotes_and_colons
+{
+    string $j = front("---\na: \"x: y\"\nb: 'it''s'\nc: \"esc \\\"q\\\" \\n\"\nd: a: b\ne: https://x.dev/a\nh: '#x'\n\"k: 1\": v\n---\n");
+    echo $j;
+    assert($j == '{"a":"x: y","b":"it\'s","c":"esc \\"q\\" \\n","d":"a: b","e":"https://x.dev/a","h":"#x","k: 1":"v"}');
+}
+
+#[group: "front"]
+test yaml_comments
+{
+    string $j = yaml("# top\nf: \"q\" # c\ng: x # c\nh: a#b\ni: 'it''s' # c\nj: '' # c\nk: \"open # c");
+    // an unclosed quote keeps everything, comment included
+    echo $j;
+    assert($j == '{"f":"q","g":"x","h":"a#b","i":"it\'s","j":"","k":"\\"open # c"}');
+}
+
+#[group: "front"]
+test yaml_scalars
+{
+    string $j = yaml("t: true\ny: yes\nn: no\nq: 'no'\nnil: ~\nnul: null\nempty:\nneg: -5\ndash: -\nz: 007\nf: 1.5\nbig: 12345678901234567890");
+    echo $j;
+    assert($j == '{"t":true,"y":true,"n":false,"q":"no","nil":null,"nul":null,"empty":null,"neg":-5,"dash":"-","z":7,"f":"1.5","big":"12345678901234567890"}');
+}
+
+#[group: "front"]
+test yaml_lists
+{
+    string $j = yaml("tags: [a, \"b, c\", 1, yes, [x, y]]\nitems:\n  - one\n  - two: 2\n    three: 3\n  -\nflat:\n- x\n- y\nempty: []\nobj: { text: Go, link: /g/, deep: { a: 1 } }");
+    echo $j;
+    assert($j == '{"tags":["a","b, c",1,true,["x","y"]],"items":["one",{"two":2,"three":3},null],"flat":["x","y"],"empty":[],"obj":{"text":"Go","link":"/g/","deep":{"a":1}}}');
+}
+
+#[group: "front"]
+test yaml_nested_maps
+{
+    string $j = yaml("hero:\n  name: Echo\n  actions:\n    - text: Go\n      link: /guide/\n    - text: API\nafter: 1");
+    echo $j;
+    assert($j == '{"hero":{"name":"Echo","actions":[{"text":"Go","link":"/guide/"},{"text":"API"}]},"after":1}');
+}
+
+#[group: "front"]
+test yaml_block_strings
+{
+    string $j = yaml("desc: |\n  line one\n    indented\nfold: >\n  a\n  b\nkeep: |-\n  z\nnone: |\nlast: 1");
+    echo $j;
+    assert($j == '{"desc":"line one\\n  indented","fold":"a b","keep":"z","none":"","last":1}');
+}
+
+#[group: "front"]
+test yaml_unquote
+{
+    assert(Yaml::unquote('"a\\tb"') == "a\tb");
+    assert(Yaml::unquote('"a\\\\b"') == 'a\\b');
+    assert(Yaml::unquote("'a''b'") == "a'b");
+    assert(Yaml::unquote('"') == '"');
+    assert(Yaml::unquote('plain') == 'plain');
+}
+
+#[group: "front"]
+test yaml_depth_is_capped
+{
+    array<string> $lines = array<string>();
+    string $pad = '';
+    for (int32 $k = 0; $k < 30; $k++) {
+        $lines->push("{$pad}k:");
+        $pad->append('  ');
+    }
+    $lines->push("{$pad}leaf: 1");
+    // no crash, and the cap leaves a null somewhere down the chain
+    string $j = json::dump(Yaml::parse($lines));
+    assert($j->contains('null'));
+    assert($j->contains('leaf') == false);
+}

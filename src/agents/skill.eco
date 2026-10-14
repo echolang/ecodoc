@@ -1,0 +1,424 @@
+namespace ecodoc::agents;
+
+use ecodoc::api::{ApiPages, Reference};
+use ecodoc::config::Site;
+use ecodoc::md::Slugger;
+use ecodoc::site::{Dist, Links, SearchIndex};
+use ecodoc::sys::Zip;
+use ecodoc::text::{Ascii, Lines};
+
+/**
+ * The docs as an agent skill: a folder an agent loads when a task touches
+ * the library, and the same folder zipped for claude.ai.
+ *
+ * ```txt
+ * skill/libjson/SKILL.md
+ * skill/libjson/references/guide/01-getting-started.md
+ * skill/libjson/references/api/index.md
+ * skill/libjson/references/api/json.md
+ * skill/libjson.zip
+ * ```
+ *
+ * `SKILL.md` is the part that is always read, so it stays short: what the
+ * library is, when the skill applies, the quick start, and a map of the
+ * reference files. The files hold the rest and are opened only when the
+ * task needs them. `references/api/index.md` ends with the signature
+ * digest, which is usually the one file an agent writing code wants.
+ *
+ * Install it by copying the folder into `.claude/skills/` (a project) or
+ * `~/.claude/skills/` (everywhere), or upload the zip on claude.ai.
+ */
+public struct Skill
+{
+    /**
+     * Write the skill under `skill/` in the output.
+     *
+     * @param $warnings What would make the skill less useful, one line each. Never a failed build.
+     */
+    public static function write(Dist& $dist, const Site& $site, Links $links, const Corpus& $c, Reference $ref, array<string>& $warnings) : status<Failure>
+    {
+        string $name = Skill::name($site, $ref);
+        if ($name->contains('anthropic') || $name->contains('claude')) {
+            $warnings->push("skill name '{$name}' uses a reserved word; set #[docs::llms: { skill: { name: \"...\" } }]");
+        }
+
+        Zip $zip = Zip();
+        array<string> $map = array<string>();
+
+        // every page's file first, so a link between them can point at the file
+        Slugger $slugs = Slugger();
+        array<CorpusEntry> $guides = $c->guides();
+        array<string> $guideFiles = array<string>();
+        map<string, string> $local = map<string, string>();
+        for (usize $i = 0; $i < $guides->count(); $i++) {
+            string $n = ApiPages::number($i + 1);
+            string $slug = $slugs->slug($guides[$i]->title);
+            string $file = "references/guide/{$n}-{$slug}.md";
+            $guideFiles->push($file);
+            $local[$links->twin($guides[$i]->url)] = $file;
+        }
+        for (usize $i = 0; $i < $c->api->count(); $i++) {
+            string $file = 'references/api/index.md';
+            if ($i > 0) {
+                $file = "references/api/{$c->api[$i]->space}.md";
+            }
+            $local[$links->twin($c->api[$i]->url)] = $file;
+        }
+
+        // the guides, numbered in reading order
+        for (usize $i = 0; $i < $guides->count(); $i++) {
+            string $file = $guideFiles[$i];
+            string $md = Skill::relink($guides[$i]->markdown, $file, $local);
+            guard Skill::put($dist, $zip, $name, $file, $md) else ($e) {
+                return .error($e);
+            };
+            string $line = "- `{$file}`: {$guides[$i]->title}";
+            if ($guides[$i]->description->empty() == false) {
+                string $d = Lines::oneLine($guides[$i]->description);
+                $line->append(". {$d}");
+            }
+            $map->push($line);
+        }
+
+        // the reference: the index with the digest, then one file per namespace
+        if ($c->api->empty() == false) {
+            string $index = Skill::relink($c->api[0]->markdown, 'references/api/index.md', $local);
+            guard Skill::put($dist, $zip, $name, 'references/api/index.md', $index) else ($e) {
+                return .error($e);
+            };
+            $map->push('- `references/api/index.md`: every namespace and type, then `## Signatures`, every declaration in one place. Read this first for any code.');
+            array<string> $spaces = array<string>();
+            map<string, string> $files = map<string, string>();
+            map<string, array<string>> $names = map<string, array<string>>();
+            for (usize $i = 1; $i < $c->api->count(); $i++) {
+                CorpusEntry $e = $c->api[$i];
+                string $space = $e->space;
+                if ($files->has($space) == false) {
+                    $spaces->push($space);
+                    $files[$space] = '';
+                    $names[$space] = array<string>();
+                } else {
+                    $files->at($space)->append("\n---\n\n");
+                }
+                $files->at($space)->append($e->markdown);
+                // the global namespace's own page is titled `Global`, which is not a name in it
+                if ($space == 'global' && $e->title == 'Global') {
+                    $names->at($space)->push('');
+                } else {
+                    $names->at($space)->push(Links::lastSegment($e->title));
+                }
+            }
+            foreach ($spaces as $space) {
+                string $file = "references/api/{$space}.md";
+                string $md = Skill::relink($files->get($space), $file, $local);
+                guard Skill::put($dist, $zip, $name, $file, $md) else ($e) {
+                    return .error($e);
+                };
+                string $list = Skill::names($names->get($space));
+                $map->push("- `{$file}`: {$list}");
+            }
+        }
+
+        string $body = Skill::body($site, $links, $c, $ref, $name, $map, $local);
+        usize $lines = Lines::split($body)->count();
+        if ($lines > 500) {
+            $warnings->push("the skill's SKILL.md is {$lines} lines; agents read all of it, so keep the first guide page short");
+        }
+        guard Skill::put($dist, $zip, $name, 'SKILL.md', $body) else ($e) {
+            return .error($e);
+        };
+        if ($site->llms->zip) {
+            guard $dist->write("skill/{$name}.zip", $zip->bytes()) else ($e) {
+                return .error($e);
+            };
+        }
+        return .ok;
+    }
+
+    /**
+     * The skill's name: `#[docs::llms: { skill: { name } }]`, else the
+     * library's module name, else the site title. Lowercase letters, digits
+     * and dashes, at most 64 of them, which is what a skill name may be.
+     */
+    public static function name(const Site& $site, const Reference& $ref) : string
+    {
+        string $raw = $site->llms->skillName->clone();
+        if ($raw->empty()) {
+            $raw = $ref->library->clone();
+        }
+        if ($raw->empty()) {
+            $raw = $site->title->clone();
+        }
+        string $slug = Skill::slug($raw);
+        if ($slug->empty()) {
+            return 'docs';
+        }
+        return $slug;
+    }
+
+    /**
+     * `$text` as a skill name: lowercase ASCII letters and digits, every
+     * other run one `-`, trimmed, at most 64 bytes.
+     *
+     * ```echo
+     * echo Skill::slug('My Lib!');  // my-lib
+     * ```
+     */
+    public static function slug(const string& $text) : string
+    {
+        string $out = '';
+        bool $dash = false;
+        for (usize $i = 0; $i < $text->size(); $i++) {
+            uint8 $b = $text->byte($i);
+            if (Ascii::digit($b) || Ascii::lower($b) || Ascii::upper($b)) {
+                if ($dash && $out->empty() == false) {
+                    $out->push(45);
+                }
+                $dash = false;
+                $out->push(Ascii::lowerByte($b));
+                continue;
+            }
+            $dash = true;
+        }
+        if ($out->size() > 64) {
+            $out = $out->sub(0, 64);
+        }
+        while ($out->ends('-')) {
+            $out = $out->sub(0, $out->size() - 1);
+        }
+        return $out;
+    }
+
+    /**
+     * What tells an agent to load the skill: the site's own description,
+     * then when it applies, naming the library and its namespaces. Kept
+     * under the 1024 characters a description may have.
+     */
+    public static function description(const Site& $site, const Reference& $ref) : string
+    {
+        string $out = $site->llms->skillDescription->clone();
+        if ($out->empty()) {
+            $out = "{$site->title}";
+            if ($site->description->empty() == false) {
+                $out->append(": {$site->description}");
+                if ($out->ends('.') == false) {
+                    $out->append('.');
+                }
+            } else {
+                $out->append('.');
+            }
+            if ($ref->library->empty() == false) {
+                $out->append(" Use when writing, reading or debugging Echo code that uses {$ref->library}");
+                array<string> $tops = array<string>();
+                foreach ($ref->tree() as $ns) {
+                    if ($ns->top() && $ns->name->empty() == false) {
+                        $tops->push("{$ns->name}::");
+                    }
+                }
+                if ($tops->empty() == false) {
+                    string $joined = str::join($tops, ', ');
+                    $out->append(" ({$joined})");
+                }
+                $out->append(", or when asked how it works.");
+            } else {
+                $out->append(" Use when working with {$site->title} or asked how it works.");
+            }
+        }
+        return SearchIndex::clip(Lines::oneLine($out), 1021);
+    }
+
+    private static function body(const Site& $site, Links $links, const Corpus& $c, const Reference& $ref, const string& $name, const array<string>& $map, const map<string, string>& $local) : string
+    {
+        string $description = Skill::description($site, $ref);
+        // a JSON string is a YAML double-quoted scalar
+        string $quoted = json::dump(json::str($description));
+        string $out = "---\nname: {$name}\ndescription: {$quoted}\n---\n\n# {$site->title}";
+        if ($site->description->empty() == false) {
+            $out->append("\n\n{$site->description}");
+        }
+        // a local preview has no published address to give
+        if ($links->origin->empty() == false) {
+            string $home = $links->absolute('/');
+            string $llms = $links->absolute('/llms.txt');
+            $out->append("\n\nThe docs are published at {$home} ([llms.txt]({$llms}) lists every page).");
+        }
+        $out->append("\n\nThe reference files below are the docs as Markdown. Read the one the task needs instead of guessing.");
+        if ($c->api->empty() == false) {
+            $out->append(' For code, start with `references/api/index.md`: its `## Signatures` lists every declaration.');
+        }
+        if ($site->llms->intro->empty() == false) {
+            $out->append("\n\n");
+            $out->append($site->llms->intro);
+        }
+
+        // the first page a reader would open, its headings one level down
+        CorpusEntry? $start = Skill::first($c);
+        if ($start != null) {
+            CorpusEntry $s = $start ?? CorpusEntry('', '', '', '');
+            $out->append("\n\n## Quick start\n\n");
+            $out->append(Skill::quickStart(Skill::relink($s->markdown, 'SKILL.md', $local), 150));
+        }
+
+        $out->append("\n\n## Reference files\n\n");
+        $out->append(str::join($map, "\n"));
+        $out->append("\n");
+        return $out;
+    }
+
+    /**
+     * The page the quick start comes from: the first one of the sidebar,
+     * else the landing page.
+     */
+    private static function first(const Corpus& $c) : CorpusEntry?
+    {
+        if ($c->groups->empty() == false && $c->groups[0]->entries->empty() == false) {
+            return $c->groups[0]->entries[0];
+        }
+        if ($c->home->empty() == false) {
+            return $c->home[0];
+        }
+        if ($c->other->empty() == false) {
+            return $c->other[0];
+        }
+        return null;
+    }
+
+    /**
+     * A page under `## Quick start`: its title dropped, its headings one
+     * level deeper, cut at a heading after `$max` lines so SKILL.md stays short.
+     */
+    private static function quickStart(const string& $md, usize $max) : string
+    {
+        array<string> $lines = Lines::split($md);
+        array<string> $kept = array<string>();
+        bool $fence = false;
+        bool $cut = false;
+        for (usize $i = 0; $i < $lines->count(); $i++) {
+            string $l = $lines[$i];
+            string $t = str::trim($l);
+            if ($t->starts('```') || $t->starts('~~~')) {
+                $fence = $fence == false;
+            }
+            if ($fence == false && $l->starts('#')) {
+                if ($i == 0 && $l->starts('# ')) {
+                    continue;
+                }
+                if ($kept->count() >= $max) {
+                    $cut = true;
+                    break;
+                }
+                $kept->push("#{$l}");
+                continue;
+            }
+            $kept->push($l);
+        }
+        while ($kept->empty() == false && Lines::blank($kept[0])) {
+            $kept->remove(0);
+        }
+        string $out = str::trim(str::join($kept, "\n"));
+        if ($cut) {
+            $out->append("\n\nThe rest of this page is in the first guide file below.");
+        }
+        return $out;
+    }
+
+    /**
+     * `$md` with every link to a page the skill bundles pointed at that
+     * page's file, relative to `$from`, the file `$md` is written to. The
+     * skill then reads the copy it carries, online or not. Links to
+     * anything else stay as written.
+     */
+    public static function relink(const string& $md, const string& $from, const map<string, string>& $local) : string
+    {
+        string $out = '';
+        usize $i = 0;
+        while ($i < $md->size()) {
+            usize $at = $md->find('](', $i);
+            if ($at >= $md->size()) {
+                $out->append($md->sub($i, $md->size() - $i));
+                break;
+            }
+            usize $start = $at + 2;
+            $out->append($md->sub($i, $start - $i));
+            // the destination ends at its hash, its title, or the paren
+            usize $end = $start;
+            while ($end < $md->size()) {
+                uint8 $b = $md->byte($end);
+                if ($b == 41 || $b == 35 || $b == 32 || $b == 10) {
+                    break;
+                }
+                $end = $end + 1;
+            }
+            string $dest = $md->sub($start, $end - $start);
+            if ($local->has($dest)) {
+                $out->append(Skill::relative($from, $local->get($dest)));
+            } else {
+                $out->append($dest);
+            }
+            $i = $end;
+        }
+        return $out;
+    }
+
+    /**
+     * The path to `$to` from the file `$from`, both relative to the skill's
+     * root: `../api/index.md` from `references/guide/01-intro.md`.
+     */
+    public static function relative(const string& $from, const string& $to) : string
+    {
+        array<string> $dir = str::split($from, '/')->owned();
+        $dir->pop();
+        array<string> $target = str::split($to, '/')->owned();
+        usize $same = 0;
+        while ($same < $dir->count() && $same + 1 < $target->count() && $dir[$same] == $target[$same]) {
+            $same = $same + 1;
+        }
+        string $out = '';
+        for (usize $i = $same; $i < $dir->count(); $i++) {
+            $out->append('../');
+        }
+        for (usize $i = $same; $i < $target->count(); $i++) {
+            if ($i > $same) {
+                $out->append('/');
+            }
+            $out->append($target[$i]);
+        }
+        return $out;
+    }
+
+    private static function put(Dist& $dist, Zip& $zip, const string& $name, const string& $file, const string& $bytes) : status<Failure>
+    {
+        guard $dist->write("skill/{$name}/{$file}", $bytes) else ($e) {
+            return .error($e);
+        };
+        $zip->add("{$name}/{$file}", $bytes);
+        return .ok;
+    }
+
+    /**
+     * Up to eight names and how many more: `Value, Error and 3 more`.
+     */
+    private static function names(const array<string>& $all) : string
+    {
+        // the namespace's own page has no last segment
+        array<string> $named = array<string>();
+        foreach ($all as $n) {
+            if ($n->empty() == false) {
+                $named->push($n);
+            }
+        }
+        array<string> $shown = array<string>();
+        for (usize $i = 0; $i < $named->count() && $i < 8; $i++) {
+            $shown->push($named[$i]);
+        }
+        string $out = str::join($shown, ', ');
+        if ($named->count() > 8) {
+            usize $more = $named->count() - 8;
+            $out->append(" and {$more} more");
+        }
+        if ($out->empty()) {
+            return 'the namespace';
+        }
+        return $out;
+    }
+}

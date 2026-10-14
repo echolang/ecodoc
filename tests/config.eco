@@ -1,0 +1,222 @@
+use ecodoc::config::{Field, Sidebar, SidebarItem, Site};
+
+function siteFrom(string $src) : Site
+{
+    return Site::from(json::parse($src)->or(json::object()));
+}
+
+#[group: "config"]
+test field_missing_and_null_read_alike
+{
+    json::Value $f = json::parse('{"title": "CLI", "order": 3, "draft": null, "flag": true, "list": ["a", 1, "b"], "one": "x", "pi": 3.5, "yes": "yes"}')->or(json::object());
+    assert(Field::text($f, 'title') == 'CLI');
+    assert(Field::text($f, 'order') == '3');
+    assert(Field::text($f, 'draft') == '');
+    assert(Field::text($f, 'missing') == '');
+    assert(Field::text($f, 'pi') == '');
+    assert(Field::text($f, 'flag') == '');
+    assert(Field::int($f, 'order', 0) == 3);
+    assert(Field::int($f, 'title', 7) == 7);
+    assert(Field::int($f, 'draft', 7) == 7);
+    assert(Field::has($f, 'draft') == false);
+    assert(Field::has($f, 'missing') == false);
+    assert(Field::has($f, 'title'));
+    assert(Field::flag($f, 'flag', false));
+    assert(Field::flag($f, 'draft', true));
+    assert(Field::flag($f, 'yes', false) == false);
+    assert(Field::items($f, 'list')->count() == 3);
+    assert(Field::items($f, 'title')->empty());
+    array<string> $strings = Field::strings($f, 'list');
+    assert($strings->count() == 2);
+    assert($strings[0] == 'a' && $strings[1] == 'b');
+    assert(Field::strings($f, 'one')->count() == 1);
+    assert(Field::strings($f, 'order')->empty());
+    assert(Field::get($f, 'missing')->isNull());
+}
+
+#[group: "config"]
+test field_reads_non_objects_as_missing
+{
+    json::Value $arr = json::parse('["title"]')->or(json::object());
+    assert(Field::text($arr, 'title') == '');
+    assert(Field::int($arr, 'title', 4) == 4);
+    assert(Field::flag($arr, 'title', true));
+    assert(Field::items($arr, 'title')->empty());
+    json::Value $n = json::nil();
+    assert(Field::text($n, 'x') == '');
+    assert(Field::has($n, 'x') == false);
+}
+
+#[group: "config"]
+test field_attribute_values
+{
+    json::Value $a = json::parse('{"kind": "record", "fields": [{"key": "name", "value": {"kind": "string", "text": "x"}}, {"key": "n", "value": {"kind": "int", "integer": 4}}, {"key": "on", "value": {"kind": "bool", "boolean": true}}, {"key": "list", "value": {"kind": "list", "items": [{"kind": "name", "text": "a"}, {"kind": "float", "number": 1.5}]}}, {"key": "odd", "value": {"kind": "weird"}}]}')->or(json::object());
+    json::Value $v = Field::attribute($a);
+    string $dumped = json::dump($v);
+    echo $dumped;
+    assert($dumped == '{"name":"x","n":4,"on":true,"list":["a",1.5],"odd":null}');
+}
+
+#[group: "config"]
+test field_tools_keep_one_namespace
+{
+    json::Value $m = json::parse('{"tools": [{"namespace": "docs", "name": "title", "value": {"kind": "string", "text": "lib"}}, {"namespace": "other", "name": "title", "value": {"kind": "string", "text": "no"}}, {"namespace": "docs", "name": "bare"}, {"namespace": "docs", "name": "title", "value": {"kind": "string", "text": "last"}}]}')->or(json::object());
+    json::Value $d = Field::tools($m, 'docs');
+    assert(Field::text($d, 'title') == 'last');
+    assert(Field::flag($d, 'bare', false));
+    assert(Field::tools(json::object(), 'docs')->isObject());
+}
+
+#[group: "config"]
+test site_defaults
+{
+    Site $s = siteFrom('{}');
+    assert($s->title == '');
+    assert($s->base == '/');
+    assert($s->baseStated == false);
+    assert($s->url == '');
+    assert($s->lang == 'en');
+    assert($s->theme == 'auto');
+    assert($s->footer == '' && $s->copyright == '');
+    assert($s->nav->empty());
+    assert($s->sidebars->empty());
+    assert($s->api->enabled == false);
+    assert($s->api->base == '/api/');
+    assert($s->api->visibility == 'public');
+    assert($s->llms->enabled);
+    assert($s->sidebarFor('/guide/') == null);
+}
+
+#[group: "config"]
+test site_wrong_types_fall_back
+{
+    Site $s = siteFrom('{"title": 3, "lang": false, "theme": "purple", "nav": {"text": "x"}, "sidebar": "nope", "api": "yes", "footer": 7, "llms": "maybe"}');
+    assert($s->title == '3');
+    assert($s->lang == 'en');
+    assert($s->theme == 'auto');
+    assert($s->nav->empty());
+    assert($s->sidebars->empty());
+    assert($s->api->enabled == false);
+    assert($s->footer == '');
+    assert($s->llms->enabled);
+
+    Site $arr = Site::from(json::parse('[1, 2]')->or(json::object()));
+    assert($arr->title == '' && $arr->base == '/');
+}
+
+#[group: "config"]
+test site_theme_and_footer
+{
+    assert(siteFrom('{"theme": "light"}')->theme == 'light');
+    assert(siteFrom('{"theme": "dark"}')->theme == 'dark');
+    Site $plain = siteFrom('{"footer": "Built."}');
+    assert($plain->footer == 'Built.' && $plain->copyright == '');
+    Site $rich = siteFrom('{"footer": {"message": "Hi", "copyright": "(c) me"}}');
+    assert($rich->footer == 'Hi' && $rich->copyright == '(c) me');
+}
+
+#[group: "config"]
+test site_base_is_normalized
+{
+    assert(siteFrom('{"base": "docs"}')->base == '/docs/');
+    assert(siteFrom('{"base": "/docs"}')->base == '/docs/');
+    assert(siteFrom('{"base": "docs/"}')->base == '/docs/');
+    assert(siteFrom('{"base": " /docs/ "}')->base == '/docs/');
+    assert(siteFrom('{"base": "/"}')->base == '/');
+    assert(siteFrom('{"base": "/a/b"}')->base == '/a/b/');
+    Site $none = siteFrom('{"base": ""}');
+    assert($none->base == '/' && $none->baseStated == false);
+}
+
+#[group: "config"]
+test site_url_is_trimmed
+{
+    assert(Site::origin(' https://x.dev/docs/// ') == 'https://x.dev/docs');
+    assert(Site::origin('') == '');
+    assert(Site::urlPath('https://x.dev') == '');
+    assert(Site::urlPath('https://x.dev/') == '');
+    assert(Site::urlPath('https://x.dev/a/b') == '/a/b');
+    assert(Site::urlPath('x.dev/a') == '');
+    Site $s = siteFrom('{"url": "https://x.dev/a/b/"}');
+    assert($s->url == 'https://x.dev/a/b');
+    assert($s->base == '/a/b/');
+    Site $empty = siteFrom('{"url": ""}');
+    assert($empty->url == '' && $empty->base == '/');
+}
+
+#[group: "config"]
+test site_nav_links_and_prefixes
+{
+    Site $s = siteFrom('{"nav": [{"text": "Guide", "link": "/guide/intro"}, {"text": "API", "link": "api"}, {"text": "Echo", "link": "https://echoc.dev"}, {"text": "Home", "link": "/"}, {"text": "Mine", "link": "/x/", "prefix": "/y/"}, {"text": "Empty"}]}');
+    assert($s->nav->count() == 6);
+    assert($s->nav[0]->link == '/guide/intro/');
+    assert($s->nav[0]->prefix == '/guide/');
+    assert($s->nav[1]->link == '/api/');
+    assert($s->nav[1]->prefix == '/api/');
+    assert($s->nav[2]->link == 'https://echoc.dev');
+    assert($s->nav[3]->prefix == '/');
+    assert($s->nav[4]->prefix == '/y/');
+    assert($s->nav[5]->link == '' && $s->nav[5]->prefix == '');
+}
+
+#[group: "config"]
+test sidebar_forms
+{
+    // a list of based sidebars, a bare group for every page, and a second list for a base merging in
+    Site $s = siteFrom('{"sidebar": [{"base": "/guide", "items": [{"text": "Start", "items": [{"text": "Intro", "link": "guide/intro.md"}]}]}, {"text": "Loose", "items": [{"text": "Home", "link": "/"}]}, {"base": "/guide/", "items": [{"text": "More", "link": "/guide/more", "collapsed": true}]}]}');
+    assert($s->sidebars->count() == 2);
+    Sidebar $guide = $s->sidebars[0];
+    assert($guide->base == '/guide/');
+    assert($guide->items->count() == 2);
+    assert($guide->items[0]->items[0]->link == '/guide/intro/');
+    assert($guide->items[1]->collapsed);
+    assert($s->sidebars[1]->base == '/');
+    assert($s->sidebars[1]->items[0]->text == 'Loose');
+
+    array<SidebarItem> $links = $guide->links();
+    assert($links->count() == 2);
+    assert($links[0]->link == '/guide/intro/');
+    assert($links[1]->link == '/guide/more/');
+}
+
+#[group: "config"]
+test sidebar_longest_base_wins
+{
+    Site $s = siteFrom('{"sidebar": [{"base": "/", "items": [{"text": "Root", "link": "/"}]}, {"base": "/guide/advanced/", "items": [{"text": "Deep", "link": "/guide/advanced/x"}]}, {"base": "/guide/", "items": [{"text": "Guide", "link": "/guide/"}]}]}');
+    assert(($s->sidebarFor('/guide/advanced/x/')?->base ?? '') == '/guide/advanced/');
+    assert(($s->sidebarFor('/guide/advanced/')?->base ?? '') == '/guide/advanced/');
+    assert(($s->sidebarFor('/guide/intro/')?->base ?? '') == '/guide/');
+    assert(($s->sidebarFor('/guide/')?->base ?? '') == '/guide/');
+    // a base is a directory: /guidebook/ is not under /guide/
+    assert(($s->sidebarFor('/guidebook/')?->base ?? '') == '/');
+    assert(($s->sidebarFor('/')?->base ?? '') == '/');
+
+    Site $only = siteFrom('{"sidebar": [{"base": "/guide/", "items": [{"text": "Guide", "link": "/guide/"}]}]}');
+    assert($only->sidebarFor('/api/') == null);
+    assert($only->sidebarFor('/guide') == null);
+}
+
+#[group: "config"]
+test api_and_llms_options
+{
+    Site $bare = siteFrom('{"api": true}');
+    assert($bare->api->enabled);
+    assert($bare->api->manifest == '../module.eco');
+    Site $off = siteFrom('{"api": false}');
+    assert($off->api->enabled == false);
+    Site $s = siteFrom('{"api": {"manifest": "../lib.eco", "visibility": "secret", "autolink": false, "all": true, "modules": "core", "base": "reference", "title": "Ref"}}');
+    assert($s->api->enabled);
+    assert($s->api->manifest == '../lib.eco');
+    assert($s->api->visibility == 'public');
+    assert($s->api->autolink == false);
+    assert($s->api->all);
+    assert($s->api->modules->count() == 1 && $s->api->modules[0] == 'core');
+    assert($s->api->base == '/reference/');
+    assert($s->api->title == 'Ref');
+    assert(siteFrom('{"api": {"visibility": "internal"}}')->api->visibility == 'internal');
+
+    Site $l = siteFrom('{"llms": {"exclude": "guide/internal.md"}}');
+    assert($l->llms->exclude[0] == '/guide/internal/');
+    assert($l->llms->covers('/guide/internal/') == false);
+    assert($l->llms->covers('/guide/internals/'));
+}

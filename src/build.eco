@@ -2,6 +2,7 @@ namespace ecodoc;
 
 use std::io;
 use std::time;
+use ecodoc::agents::{Corpus, Llms, Skill};
 use ecodoc::api::Reference;
 use ecodoc::config::{Field, Sidebar, Site};
 use ecodoc::site::{Asset, Dist, Home, Layout, Links, Neighbours, Page, PageLayout, PageView, Pager, Route, SearchIndex, Theme};
@@ -55,6 +56,17 @@ public class Builder
     public string $base = '';
 
     /**
+     * Overrides `#[docs::url:]`, the address the site is published at.
+     */
+    public string $url = '';
+
+    /**
+     * A preview on this machine, as `dev` builds it: links for agents stay
+     * site paths instead of pointing at the published site.
+     */
+    public bool $local = false;
+
+    /**
      * Fail the build on a dead link or an unresolved symbol.
      */
     public bool $strict = false;
@@ -101,6 +113,8 @@ public class Builder
         $b->docs = $this->docs->clone();
         $b->out = $this->out->clone();
         $b->base = $this->base->clone();
+        $b->url = $this->url->clone();
+        $b->local = $this->local;
         $b->strict = $this->strict;
         return $b;
     }
@@ -130,10 +144,11 @@ public class Builder
     /**
      * Build the site into `target()`.
      *
-     * The order matters. The API reference is read first, because its symbols
-     * are what `api:` links in the pages resolve to. Then every page is read
-     * before any is rendered, so a link to a page further down the walk
-     * resolves too. Only then is anything written.
+     * The order matters. Every page is read before anything is rendered, so
+     * a link to a page further down the walk resolves, and so does a link
+     * from the reference to a page's Markdown twin. Then the API reference
+     * is read, because its symbols are what `api:` links in the pages
+     * resolve to. Only then is anything written.
      *
      * A build that fails on the manifest, a page, or `--strict` has not touched
      * the output directory. The old site stays up.
@@ -146,6 +161,10 @@ public class Builder
         Site $site = guard Site::load($this->echoc, $this->docs) else ($e) {
             return .error($e);
         };
+        // --url behaves like the manifest's url, its path the base; --base beats both
+        if ($this->url->empty() == false) {
+            $site->publish($this->url);
+        }
         if ($this->base->empty() == false) {
             $site->base = Route::base($this->base);
         }
@@ -153,14 +172,36 @@ public class Builder
         Links $links = Links();
         $links->base = $site->base;
         $links->autolink = $site->api->autolink;
+        // a local preview links to itself, not to the published site
+        if ($this->local == false) {
+            $links->origin = $site->url;
+        }
         SearchIndex $search = SearchIndex();
         array<PageView> $views = array<PageView>();
 
-        // the reference first: its symbols are what `api:` links in pages resolve to
-        if ($site->api->enabled) {
-            Reference $ref = guard Reference::read($this->echoc, $this->docs, $site) else ($e) {
+        // pages: every one is known before any is rendered, so links between them resolve
+        array<string> $skip = Walk::ignored();
+        $skip->push('public');
+        $skip->push(Path::base($this->target()));
+        array<Page> $pages = array<Page>();
+        foreach (Walk::files($this->docs, '.md', $skip) as $rel) {
+            Page $p = guard Page::read($this->docs, $rel) else ($e) {
                 return .error($e);
             };
+            $links->pages[$rel] = $p->url;
+            if ($p->forAgents($site->llms)) {
+                $links->twins[$p->url] = true;
+            }
+            $pages->push($p);
+        }
+
+        // the reference next: its symbols are what `api:` links in pages resolve to
+        Reference $ref = Reference();
+        if ($site->api->enabled) {
+            Reference $read = guard Reference::read($this->echoc, $this->docs, $site) else ($e) {
+                return .error($e);
+            };
+            $ref = $read;
             if ($site->title->empty()) {
                 $site->title = $ref->library->clone();
             }
@@ -174,19 +215,6 @@ public class Builder
         }
         if ($site->title->empty()) {
             $site->title = Path::base(Path::dir(Path::normalize(Builder::absolute($this->docs))));
-        }
-
-        // pages: every one is known before any is rendered, so links between them resolve
-        array<string> $skip = Walk::ignored();
-        $skip->push('public');
-        $skip->push(Path::base($this->target()));
-        array<Page> $pages = array<Page>();
-        foreach (Walk::files($this->docs, '.md', $skip) as $rel) {
-            Page $p = guard Page::read($this->docs, $rel) else ($e) {
-                return .error($e);
-            };
-            $links->pages[$rel] = $p->url;
-            $pages->push($p);
         }
 
         foreach ($pages as $p) {
@@ -226,6 +254,11 @@ public class Builder
             guard $dist->write(Route::file($v->url), $html) else ($e) {
                 return .error($e);
             };
+            if ($v->markdown->empty() == false) {
+                guard $dist->write(Route::markdown($v->url), $v->markdown) else ($e) {
+                    return .error($e);
+                };
+            }
         }
         guard $dist->write('404.html', Layout::render($site, $links, Builder::notFound($site))) else ($e) {
             return .error($e);
@@ -241,6 +274,9 @@ public class Builder
                 return .error($e);
             };
         }
+        guard $this->agents($dist, $site, $links, $views, $ref) else ($e) {
+            return .error($e);
+        };
 
         // images and other files next to the pages, and public/ at the root
         guard $dist->copyTree($this->docs, '', $skip) else ($e) {
@@ -253,6 +289,33 @@ public class Builder
 
         $this->site = $site;
         return .ok;
+    }
+
+    /**
+     * The files for agents next to the site: `llms.txt` and the skill.
+     * Written before `public/` is copied, so a hand-written `public/llms.txt`
+     * wins. What the skill warns about never fails the build.
+     */
+    private function agents(Dist& $dist, const Site& $site, Links $links, const array<PageView>& $views, Reference $ref) : status<Failure>
+    {
+        if ($site->llms->enabled == false) {
+            return .ok;
+        }
+        Corpus $corpus = Corpus::collect($site, $views, $ref);
+        if ($corpus->empty()) {
+            return .ok;
+        }
+        guard $dist->write('llms.txt', Llms::index($site, $links, $corpus)) else ($e) {
+            return .error($e);
+        };
+        if ($site->llms->skill == false) {
+            return .ok;
+        }
+        // a preview links to itself on purpose, and says so on every save otherwise
+        if ($site->url->empty() && $this->local == false) {
+            $this->warnings->push('the skill links to the hosted docs by path only; #[docs::url: "https://..."] makes those links work outside the site');
+        }
+        return Skill::write($dist, $site, $links, $corpus, $ref, $this->warnings);
     }
 
     private function view(const Site& $site, Links $links, Page $p, SearchIndex& $search) : PageView
@@ -281,6 +344,9 @@ public class Builder
             $v->main = Home::render($p, $links, $site);
         } else {
             $v->main = "<article class=\"doc\">{$p->html}</article>\n";
+        }
+        if ($links->twins->has($p->url)) {
+            $v->markdown = $p->markdown($links, $site);
         }
 
         // the page, then every section of it

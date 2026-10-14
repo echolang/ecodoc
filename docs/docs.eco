@@ -19,7 +19,8 @@
     ] },
     { text: "Writing", items: [
         { text: "Pages", link: "/guide/pages" },
-        { text: "API reference", link: "/guide/api" }
+        { text: "API reference", link: "/guide/api" },
+        { text: "Docs for agents", link: "/guide/agents" }
     ] },
     { text: "Running", items: [
         { text: "Command line", link: "/guide/cli" }

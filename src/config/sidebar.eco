@@ -103,7 +103,10 @@ public class Sidebar
         return $out;
     }
 
-    private static function flatten(const array<SidebarItem>& $items, array<SidebarItem>& $out) : void
+    /**
+     * Every link under `$items` in reading order, onto `$out`.
+     */
+    internal static function flatten(const array<SidebarItem>& $items, array<SidebarItem>& $out) : void
     {
         foreach ($items as $item) {
             if ($item->link->empty() == false) {

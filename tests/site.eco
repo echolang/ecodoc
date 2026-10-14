@@ -1,0 +1,497 @@
+use ecodoc::config::Site;
+use ecodoc::md::Heading;
+use ecodoc::site::{Dist, Home, Layout, Links, Neighbours, Page, Pager, PageLayout, PagerLink, PageView, Route, SearchIndex, TocGroup};
+
+function siteOf(string $src) : Site
+{
+    return Site::from(json::parse($src)->or(json::object()));
+}
+
+function frontOf(string $src) : json::Value
+{
+    return json::parse($src)->or(json::object());
+}
+
+function pageLinks(string $page) : Links
+{
+    Links $links = Links();
+    $links->page = $page;
+    $links->pages['index.md'] = '/';
+    $links->pages['guide/index.md'] = '/guide/';
+    $links->pages['guide/intro.md'] = '/guide/intro/';
+    $links->pages['guide/deep/a.md'] = '/guide/deep/a/';
+    $links->pages['about.md'] = '/about/';
+    return $links;
+}
+
+#[group: "site"]
+test route_for_page
+{
+    assert(Route::forPage('index.md') == '/');
+    assert(Route::forPage('guide/index.md') == '/guide/');
+    assert(Route::forPage('guide/intro.md') == '/guide/intro/');
+    assert(Route::forPage('a/b/c/index.md') == '/a/b/c/');
+    assert(Route::forPage('guide/my-index.md') == '/guide/my-index/');
+    assert(Route::forPage('guide/reindex.md') == '/guide/reindex/');
+    assert(Route::forPage('v1.2.md') == '/v1.2/');
+    assert(Route::forPage('README.md') == '/README/');
+}
+
+#[group: "site"]
+test route_file
+{
+    assert(Route::file('/') == 'index.html');
+    assert(Route::file('') == 'index.html');
+    assert(Route::file('/guide/') == 'guide/index.html');
+    assert(Route::file('/guide') == 'guide/index.html');
+    assert(Route::file('/404.html') == '404.html');
+    assert(Route::file('/assets/a.css') == 'assets/a.css');
+}
+
+#[group: "site"]
+test route_link
+{
+    assert(Route::link('') == '');
+    assert(Route::link('  /guide  ') == '/guide/');
+    assert(Route::link('guide') == '/guide/');
+    assert(Route::link('/guide/intro.md') == '/guide/intro/');
+    assert(Route::link('guide/index.md') == '/guide/');
+    assert(Route::link('index.md') == '/');
+    assert(Route::link('/index.html') == '/');
+    assert(Route::link('/guide/index.html') == '/guide/');
+    assert(Route::link('/guide/cli.html') == '/guide/cli/');
+    assert(Route::link('/guide/cli.md#flags') == '/guide/cli/#flags');
+    assert(Route::link('/guide#flags') == '/guide/#flags');
+    assert(Route::link('/logo.svg') == '/logo.svg');
+    assert(Route::link('https://x.dev/a') == 'https://x.dev/a');
+    assert(Route::link('//cdn.dev/a') == '//cdn.dev/a');
+    assert(Route::link('mailto:a@b.c') == 'mailto:a@b.c');
+    assert(Route::link('tel:+41') == 'tel:+41');
+}
+
+#[group: "site"]
+test route_link_keeps_the_query
+{
+    string $q = Route::link('/search?q=x');
+    echo $q;
+    assert($q == '/search/?q=x');
+    assert(Route::link('/guide/cli.md?v=2#flags') == '/guide/cli/?v=2#flags');
+}
+
+#[group: "site"]
+test route_section_and_base
+{
+    assert(Route::section('/guide/intro/') == '/guide/');
+    assert(Route::section('/guide/') == '/guide/');
+    assert(Route::section('/') == '/');
+    assert(Route::section('') == '');
+    assert(Route::section('https://x.dev/a/') == 'https://x.dev/a/');
+    assert(Route::base('') == '/');
+    assert(Route::base('x') == '/x/');
+    assert(Route::rooted('img.png') == '/img.png');
+    assert(Route::rooted('/img.png') == '/img.png');
+    assert(Route::rooted('https://x.dev/i.png') == 'https://x.dev/i.png');
+}
+
+#[group: "site"]
+test links_url_under_the_base
+{
+    Links $l = Links();
+    assert($l->url('/guide/') == '/guide/');
+    $l->base = '/lib/';
+    assert($l->url('/guide/') == '/lib/guide/');
+    assert($l->url('/') == '/lib/');
+    assert($l->url('') == '');
+    assert($l->url('#x') == '#x');
+    assert($l->url('https://x.dev/') == 'https://x.dev/');
+    // a protocol-relative URL leaves the site, so the base stays off it
+    assert($l->url('//cdn.dev/a.js') == '//cdn.dev/a.js');
+    $l->origin = 'https://e.dev/lib';
+    assert($l->absolute('/guide/') == 'https://e.dev/lib/guide/');
+    assert($l->absolute('//cdn.dev/a.js') == '//cdn.dev/a.js');
+}
+
+#[group: "site"]
+test links_relative_pages
+{
+    Links $l = pageLinks('guide/intro.md');
+    assert($l->href('./index.md') == '/guide/');
+    assert($l->href('../index.md') == '/');
+    assert($l->href('../about.md') == '/about/');
+    assert($l->href('deep/a.md') == '/guide/deep/a/');
+    assert($l->href('./deep/a') == '/guide/deep/a/');
+    assert($l->href('/about') == '/about/');
+    assert($l->href('/guide/') == '/guide/');
+    assert($l->href('./') == '/guide/');
+    assert($l->href('/') == '/');
+    assert($l->href('..') == '/');
+    string $up = $l->href('../');
+    echo $up;
+    assert($up == '/');
+    Links $deep = pageLinks('guide/deep/a.md');
+    assert($deep->href('../../') == '/');
+    assert($deep->href('../') == '/guide/');
+    assert($deep->href('../intro.md') == '/guide/intro/');
+    assert($l->warnings->empty());
+    assert($deep->warnings->empty());
+}
+
+#[group: "site"]
+test links_anchors_queries_and_external
+{
+    Links $l = pageLinks('guide/intro.md');
+    $l->base = '/lib/';
+    assert($l->href('#top') == '#top');
+    assert($l->href('./index.md#install') == '/lib/guide/#install');
+    assert($l->href('../about.md?x=1#y') == '/lib/about/?x=1#y');
+    assert($l->href('https://x.dev/a.md') == 'https://x.dev/a.md');
+    assert($l->href('//cdn.dev/x') == '//cdn.dev/x');
+    assert($l->href('mailto:me@x.dev') == 'mailto:me@x.dev');
+    assert($l->href('tel:+41') == 'tel:+41');
+    assert($l->href('?tab=2') == '?tab=2');
+    assert($l->href('?tab=2#x') == '?tab=2#x');
+    assert($l->href('  ./index.md  ') == '/lib/guide/');
+    assert($l->href('img/logo.png') == '/lib/guide/img/logo.png');
+    assert($l->href('/assets/x.css') == '/lib/assets/x.css');
+    assert($l->warnings->empty());
+}
+
+#[group: "site"]
+test links_dead_pages_warn_once
+{
+    Links $l = pageLinks('guide/intro.md');
+    $l->line = 4;
+    string $h = $l->href('./missing.md#x');
+    assert($h == '/guide/missing/#x');
+    $l->href('./missing.md#x');
+    $l->href('../../outside.md');
+    echo $l->warnings->count();
+    assert($l->warnings->count() == 2);
+    assert($l->warnings[0] == "guide/intro.md:4: dead link './missing.md#x'");
+    assert(($l->api('nope') ?? 'none') == 'none');
+    assert($l->warnings->count() == 3);
+    // the same unresolved symbol again is the same warning
+    assert($l->href('api:nope') == '');
+    assert($l->warnings->count() == 3);
+}
+
+#[group: "site"]
+test links_api_pages_keep_site_paths
+{
+    Links $l = pageLinks('/api/json/Value/');
+    $l->base = '/lib/';
+    assert($l->href('/guide/intro/#x') == '/lib/guide/intro/#x');
+    assert($l->href('#get') == '#get');
+}
+
+#[group: "site"]
+test links_symbols_resolve
+{
+    Links $l = Links();
+    $l->symbol('json::Value', '/api/json/Value/', 'Value');
+    $l->symbol('json::Value::get', '/api/json/Value/#get', 'get()');
+    $l->symbol('yaml::get', '/api/yaml/#get', 'get()');
+    assert(($l->resolve('Value') ?? '') == 'json::Value');
+    assert($l->resolve('get') == null);
+    assert(($l->resolve('json::Value::get()') ?? '') == 'json::Value::get');
+    $l->scope = 'json::Value';
+    assert(($l->resolve('get()') ?? '') == 'json::Value::get');
+    $l->scope = 'yaml::Doc';
+    assert(($l->resolve('get') ?? '') == 'yaml::get');
+    assert(Links::lastSegment('a::b::c') == 'c');
+    assert(Links::lastSegment('c') == 'c');
+    assert(Links::parent('a::b::c') == 'a::b');
+    assert(Links::parent('c') == '');
+    assert($l->label('nope') == 'nope');
+    assert($l->label('json::Value') == 'Value');
+}
+
+#[group: "site"]
+test links_code_escapes_and_links
+{
+    Links $l = Links();
+    $l->symbol('json::Value', '/api/json/Value/', 'Value');
+    assert($l->code('<b>') == '<code>&lt;b&gt;</code>');
+    assert($l->code('json::Value') == '<code>json::Value</code>');
+    $l->autolink = true;
+    $l->base = '/lib/';
+    assert($l->code('json::Value') == '<a class="sym" href="/lib/api/json/Value/"><code>json::Value</code></a>');
+    assert($l->code('Value') == '<code>Value</code>');
+}
+
+#[group: "site"]
+test pager_follows_the_sidebar
+{
+    Site $s = siteOf('{"sidebar": [{"base": "/guide/", "items": [{"text": "Start", "items": [{"text": "Intro", "link": "/guide/"}, {"text": "Install", "link": "/guide/install"}]}, {"text": "More", "items": [{"text": "CLI", "link": "/guide/cli"}]}]}]}');
+    json::Value $none = json::object();
+    Neighbours $first = Pager::of($s, '/guide/', $none);
+    assert($first->prev->empty());
+    assert($first->next->link == '/guide/install/' && $first->next->text == 'Install');
+    Neighbours $mid = Pager::of($s, '/guide/install/', $none);
+    assert($mid->prev->link == '/guide/' && $mid->next->link == '/guide/cli/');
+    Neighbours $last = Pager::of($s, '/guide/cli/', $none);
+    assert($last->prev->text == 'Install' && $last->next->empty());
+    Neighbours $stray = Pager::of($s, '/guide/stray/', $none);
+    assert($stray->prev->empty() && $stray->next->empty());
+    Neighbours $outside = Pager::of($s, '/api/', $none);
+    assert($outside->prev->empty() && $outside->next->empty());
+}
+
+#[group: "site"]
+test pager_frontmatter_overrides
+{
+    Site $s = siteOf('{"sidebar": [{"base": "/guide/", "items": [{"text": "A", "link": "/guide/a"}, {"text": "B", "link": "/guide/b"}, {"text": "C", "link": "/guide/c"}]}]}');
+    Neighbours $off = Pager::of($s, '/guide/b/', frontOf('{"prev": false, "next": "Onwards"}'));
+    assert($off->prev->empty());
+    assert($off->next->text == 'Onwards' && $off->next->link == '/guide/c/');
+    Neighbours $swap = Pager::of($s, '/guide/b/', frontOf('{"next": {"text": "Elsewhere", "link": "guide/x.md"}, "prev": true}'));
+    assert($swap->prev->link == '/guide/a/');
+    assert($swap->next->text == 'Elsewhere' && $swap->next->link == '/guide/x/');
+    Neighbours $free = Pager::of($s, '/api/', frontOf('{"next": {"text": "Guide", "link": "/guide/"}}'));
+    assert($free->next->link == '/guide/' && $free->prev->empty());
+}
+
+#[group: "site"]
+test search_index_json_escapes
+{
+    SearchIndex $s = SearchIndex();
+    $s->add('/a/', 'Say "hi" \\ </script>', '', 'page', 'page', "line\none\ttab", '');
+    string $j = $s->json();
+    echo $j;
+    assert($j == '{"v":1,"entries":[{"u":"/a/","t":"Say \\"hi\\" \\\\ </script>","g":"page","k":"page","s":"line\\none\\ttab"}]}');
+    json::Value $back = json::parse($j)->or(json::nil());
+    assert($back->isObject());
+}
+
+#[group: "site"]
+test search_clip
+{
+    assert(SearchIndex::clip('short', 10) == 'short');
+    assert(SearchIndex::clip('one two three', 9) == 'one two…');
+    assert(SearchIndex::clip('abcdefghij', 4) == 'abcd…');
+    // é is two bytes; a cut at byte 3 would land inside the second one
+    string $cut = SearchIndex::clip('aééé', 4);
+    echo $cut;
+    assert($cut == 'aé…');
+}
+
+#[group: "site"]
+test outline_of_headings
+{
+    array<Heading> $hs = array<Heading>();
+    $hs->push(Heading(3, 'early', '', 'Early'));
+    $hs->push(Heading(2, 'two', '', 'Two'));
+    $hs->push(Heading(3, 'three', '', 'Three'));
+    $hs->push(Heading(4, 'four', '', 'Four'));
+    $hs->push(Heading(1, 'one', '', 'One'));
+    array<TocGroup> $groups = PageView::outlineOf($hs);
+    assert($groups->count() == 2);
+    assert($groups[0]->id == 'early' && $groups[0]->items->empty());
+    assert($groups[1]->items->count() == 1 && $groups[1]->items[0]->id == 'three');
+}
+
+#[group: "site"]
+test page_layout_names
+{
+    assert(PageLayout::named('home') == PageLayout::home);
+    assert(PageLayout::named('page') == PageLayout::page);
+    assert(PageLayout::named('Home') == PageLayout::doc);
+    assert(PageLayout::named('') == PageLayout::doc);
+}
+
+#[group: "site"]
+test layout_escapes_what_the_manifest_says
+{
+    Site $s = siteOf('{"title": "A<b>&\\\"c\\\"", "version": "<v1>", "lang": "en\\\"x", "repo": "https://x.dev/?a=1&b=2", "footer": {"message": "<i>hi</i>", "copyright": "&copy"}, "nav": [{"text": "<Guide>", "link": "/guide/"}], "sidebar": [{"base": "/guide/", "items": [{"text": "<Start>", "items": [{"text": "\\\"Intro\\\"", "link": "/guide/"}]}]}]}');
+    Links $links = Links();
+    PageView $v = PageView();
+    $v->url = '/guide/';
+    $v->title = '</title><script>x</script>';
+    $v->description = 'Say "hi" & <bye>';
+    $v->main = '<p>ok</p>';
+    $v->edit = 'https://x.dev/edit?p="a"';
+    string $html = Layout::render($s, $links, $v);
+    assert($html->contains('<title>&lt;/title&gt;&lt;script&gt;x&lt;/script&gt; | A&lt;b&gt;&amp;&quot;c&quot;</title>'));
+    assert($html->contains('<meta name="description" content="Say &quot;hi&quot; &amp; &lt;bye&gt;">'));
+    assert($html->contains('<html lang="en&quot;x"'));
+    assert($html->contains('<span class="mono verchip">&lt;v1&gt;</span>'));
+    assert($html->contains('href="https://x.dev/?a=1&amp;b=2"'));
+    assert($html->contains('&lt;i&gt;hi&lt;/i&gt; · &amp;copy'));
+    assert($html->contains('&lt;Guide&gt;</a>'));
+    assert($html->contains('<span>&lt;Start&gt;</span>'));
+    assert($html->contains('<span>&quot;Intro&quot;</span>'));
+    assert($html->contains('href="https://x.dev/edit?p=&quot;a&quot;"'));
+    assert($html->contains('<script>x</script>') == false);
+    assert($html->contains('<i>hi</i>') == false);
+}
+
+#[group: "site"]
+test layout_nav_marks_the_section
+{
+    Site $s = siteOf('{"title": "lib", "nav": [{"text": "Home", "link": "/"}, {"text": "Guide", "link": "/guide/"}, {"text": "Deep", "link": "/guide/deep/", "prefix": "/guide/deep/"}, {"text": "Echo", "link": "https://echoc.dev"}]}');
+    Links $links = Links();
+    PageView $v = PageView();
+    $v->url = '/guide/intro/';
+    string $html = Layout::render($s, $links, $v);
+    assert($html->contains('<a href="/guide/" aria-current="page">Guide</a>'));
+    assert($html->contains('<a href="/" aria-current="page">') == false);
+    assert($html->contains('<a href="https://echoc.dev" target="_blank" rel="noreferrer">Echo</a>'));
+
+    $v->url = '/guide/deep/x/';
+    string $deep = Layout::render($s, $links, $v);
+    assert($deep->contains('<a href="/guide/deep/" aria-current="page">Deep</a>'));
+    assert($deep->contains('<a href="/guide/" aria-current="page">') == false);
+
+    $v->url = '/';
+    string $home = Layout::render($s, $links, $v);
+    assert($home->contains('<a href="/" aria-current="page">Home</a>'));
+    assert($home->contains('<a href="/guide/" aria-current="page">') == false);
+}
+
+#[group: "site"]
+test layout_under_a_base
+{
+    Site $s = siteOf('{"title": "lib", "base": "/lib/", "logo": "img/logo.svg", "nav": [{"text": "Guide", "link": "/guide/"}, {"text": "CDN", "link": "//cdn.dev/x"}], "sidebar": [{"base": "/guide/", "items": [{"text": "Start", "items": [{"text": "Intro", "link": "/guide/"}, {"text": "Ext", "link": "https://x.dev"}]}]}]}');
+    Links $links = Links();
+    $links->base = $s->base;
+    PageView $v = PageView();
+    $v->url = '/guide/';
+    $v->title = 'Intro';
+    $v->next = PagerLink('CLI', '/guide/cli/');
+    string $html = Layout::render($s, $links, $v);
+    assert($html->contains('<link rel="stylesheet" href="/lib/assets/ecodoc.css">'));
+    assert($html->contains('<img class="brand-logo" src="/lib/img/logo.svg" alt="">'));
+    assert($html->contains('<a class="side-link" href="/lib/guide/" aria-current="page">'));
+    assert($html->contains('href="https://x.dev"'));
+    assert($html->contains('href="//cdn.dev/x"'));
+    assert($html->contains('/lib//') == false);
+    assert($html->contains('<a class="pager-next" href="/lib/guide/cli/">'));
+    assert($html->contains('<title>Intro | lib</title>'));
+}
+
+#[group: "site"]
+test layout_initial
+{
+    assert(Layout::initial('libjson') == 'L');
+    assert(Layout::initial('_9x') == '9');
+    assert(Layout::initial('') == 'E');
+    assert(Layout::initial('ü') == 'E');
+}
+
+#[group: "site"]
+test dist_only_empties_its_own_directory
+{
+    string $root = 'ecobuild/test-dist';
+    ecodoc::sys::Sys::purge($root);
+    Dist $d = guard Dist::open($root) else {
+        assert(false, 'a missing directory is created');
+        return;
+    };
+    assert(ecodoc::sys::Sys::isFile("{$root}/.ecodoc"));
+    assert($d->write('guide/index.html', 'x')->failed() == false);
+    assert(ecodoc::sys::Sys::isFile("{$root}/guide/index.html"));
+    // a second build empties it
+    assert(Dist::open($root)->failed() == false);
+    assert(ecodoc::sys::Sys::isFile("{$root}/guide/index.html") == false);
+
+    string $foreign = 'ecobuild/test-dist-foreign';
+    ecodoc::sys::Sys::purge($foreign);
+    assert(ecodoc::sys::Sys::put("{$foreign}/keep.txt", 'mine'));
+    assert(Dist::open($foreign)->failed());
+    assert(ecodoc::sys::Sys::isFile("{$foreign}/keep.txt"));
+}
+
+function homePage(string $front, string $body) : Page
+{
+    Page $p = Page();
+    $p->rel = 'index.md';
+    $p->url = '/';
+    $p->layout = PageLayout::home;
+    $p->front = json::parse($front)->or(json::object());
+    $p->doc = ecodoc::md::Document::parse($body, 1);
+    return $p;
+}
+
+#[group: "site"]
+test home_hero_escapes_and_links
+{
+    Site $s = siteOf('{"title": "lib", "description": "Fallback <tag>."}');
+    Links $links = Links();
+    $links->base = '/lib/';
+    Page $p = homePage('{"hero": {"name": "<lib>", "text": "A & B", "actions": [{"theme": "brand", "text": "Go \\"now\\"", "link": "guide/index.md"}, {"text": "Echo", "link": "https://echoc.dev"}, {"text": "CDN", "link": "//cdn.dev/x"}]}, "features": [{"title": "<b>", "details": "d&d", "icon": "<svg>", "link": "/guide"}, {"title": "Plain", "details": "x"}]}', '');
+    string $html = Home::render($p, $links, $s);
+    echo $html;
+    assert($html->contains('<h1>&lt;lib&gt;<span class="home-text">A &amp; B</span></h1>'));
+    assert($html->contains('<p class="tagline">Fallback &lt;tag&gt;.</p>'));
+    assert($html->contains('<a class="btn brand" href="/lib/guide/">Go &quot;now&quot;</a>'));
+    assert($html->contains('<a class="btn" href="https://echoc.dev">Echo</a>'));
+    assert($html->contains('<a class="btn" href="//cdn.dev/x">CDN</a>'));
+    assert($html->contains('<a class="feature" href="/lib/guide/"><span class="feature-icon" aria-hidden="true">&lt;svg&gt;</span><span class="feature-title">&lt;b&gt;</span><span class="feature-details">d&amp;d</span></a>'));
+    assert($html->contains('<div class="feature"><span class="feature-title">Plain</span>'));
+    assert($html->contains('<article') == false);
+}
+
+#[group: "site"]
+test home_falls_back_to_the_site
+{
+    Site $s = siteOf('{"title": "lib"}');
+    Links $links = Links();
+    Page $p = homePage('{}', '');
+    string $html = Home::render($p, $links, $s);
+    assert($html->contains('<h1>lib</h1>'));
+    assert($html->contains('tagline') == false);
+    assert($html->contains('actions') == false);
+    string $md = Home::markdown($p, $links, $s);
+    echo $md;
+    assert($md == "# lib\n");
+}
+
+#[group: "site"]
+test page_flags_by_layout
+{
+    Page $doc = Page();
+    assert($doc->outline() && $doc->sidebar());
+    $doc->front = frontOf('{"outline": false, "sidebar": false, "llms": false}');
+    assert($doc->outline() == false && $doc->sidebar() == false);
+    assert($doc->forAgents(ecodoc::config::LlmsConfig()) == false);
+    Page $home = homePage('{}', '');
+    assert($home->outline() == false && $home->sidebar() == false);
+    $home->front = frontOf('{"sidebar": true}');
+    assert($home->sidebar());
+}
+
+#[group: "site"]
+test page_title_and_description_fall_back
+{
+    Links $links = pageLinks('guide/my-page.md');
+    Page $p = Page();
+    $p->rel = 'guide/my-page.md';
+    $p->doc = ecodoc::md::Document::parse("Some **bold** text & more.\n\nSecond.", 1);
+    $p->render($links);
+    assert($p->title == 'My-page');
+    echo $p->description;
+    assert($p->description == 'Some bold text & more.');
+
+    Page $h = Page();
+    $h->rel = 'guide/x.md';
+    $h->doc = ecodoc::md::Document::parse("# Tips & `a<b`\n\nBody.", 1);
+    $h->render($links);
+    echo $h->title;
+    assert($h->title == 'Tips & a<b');
+    assert($h->description == 'Body.');
+}
+
+#[group: "site"]
+test layout_sidebar_opens_the_current_group
+{
+    Site $s = siteOf('{"sidebar": [{"base": "/", "items": [{"text": "A", "collapsed": true, "items": [{"text": "One", "link": "/a/one"}]}, {"text": "B", "collapsed": true, "items": [{"text": "Two", "link": "/b/two"}]}]}]}');
+    PageView $v = PageView();
+    $v->url = '/a/one/';
+    string $html = Layout::render($s, Links(), $v);
+    assert($html->contains('<div class="side-group"><button type="button" class="side-title side-toggle" data-side-toggle aria-expanded="true"><span>A</span>'));
+    assert($html->contains('<div class="side-group collapsed"><button type="button" class="side-title side-toggle" data-side-toggle aria-expanded="false"><span>B</span>'));
+    $v->sidebar = false;
+    string $bare = Layout::render($s, Links(), $v);
+    assert($bare->contains('class="side"') == false);
+    assert($bare->contains('<div class="body no-side">'));
+}

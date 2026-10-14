@@ -41,6 +41,26 @@ public struct Spell
     public usize $width = 60;
 
     /**
+     * Spell every type by its qualified name, `json::Value`, except one in
+     * `$within`. The HTML says `Value` and links it; plain text has no link
+     * to hover, so the name has to say where the type lives.
+     */
+    public bool $qualify = false;
+
+    /**
+     * The namespace whose types keep their short name when `$qualify` is on:
+     * the one the text is about.
+     */
+    public string $within = '';
+
+    /**
+     * Spell an enum case as `case none` and a constructor as
+     * `constructor(...)`, the way a type body declares them, instead of the
+     * way they are called.
+     */
+    public bool $declared = false;
+
+    /**
      * Append the highlighted HTML of type tree `$t` to `$out`. Named types
      * link to their page when the type is documented.
      */
@@ -145,6 +165,16 @@ public struct Spell
      */
     public function named(const string& $qualified, string& $out) : void
     {
+        if ($this->qualify) {
+            string $shown = $qualified->clone();
+            if (Links::parent($qualified) == $this->within) {
+                $shown = Links::lastSegment($qualified);
+            }
+            $out->append('<span class="t">');
+            Html::escapeInto($shown, $out);
+            $out->append('</span>');
+            return;
+        }
         if ($this->links->symbols->has($qualified)) {
             string $href = Html::escape($this->links->url($this->links->symbols->get($qualified)));
             string $short = Html::escape(Links::lastSegment($qualified));
@@ -190,6 +220,8 @@ public struct Spell
                 $body = "weak<{$to}>";
             } else if (Field::flag($t, 'borrow', false)) {
                 $body = "{$to}&";
+            } else if (Field::flag($t, 'const', false)) {
+                $body = "const ptr<{$to}>";
             } else {
                 $body = "ptr<{$to}>";
             }
@@ -201,6 +233,9 @@ public struct Spell
             }
             string $joined = str::join($ps, ', ');
             $body = "function<{$ret}({$joined})>";
+            if (Field::flag($t, 'extern', false)) {
+                $body = "extern {$body}";
+            }
         } else {
             $body = Field::text($t, 'name');
             array<json::Value> $args = Field::items($t, 'args');
@@ -359,6 +394,91 @@ public struct Spell
     }
 
     /**
+     * The declaration of a member as highlighted HTML: an enum case with its
+     * payload, a field, a constant, or a function's signature. `ApiPages`
+     * puts it in a box; `line()` takes the text out of it.
+     */
+    public function member(const ApiMember& $m, const json::Value& $decl, string& $out) : void
+    {
+        if ($m->kind == 'case') {
+            if ($this->declared) {
+                $out->append('<span class="k">case</span> ');
+            } else {
+                $this->named($m->owner, $out);
+                $out->append('<span class="p">::</span>');
+            }
+            $out->append('<span class="f">');
+            Html::escapeInto($m->name, $out);
+            $out->append('</span>');
+            array<json::Value> $payload = Field::items($decl, 'payload');
+            if ($payload->empty() == false) {
+                $out->append('<span class="p">(</span>');
+                bool $first = true;
+                foreach ($payload as $p) {
+                    if ($first == false) {
+                        $out->append('<span class="p">,</span> ');
+                    }
+                    $this->type(Field::get($p, 'type'), $out);
+                    $out->append(' <span class="v">$');
+                    Html::escapeInto(Field::text($p, 'name'), $out);
+                    $out->append('</span>');
+                    $first = false;
+                }
+                $out->append('<span class="p">)</span>');
+            }
+            string $value = Field::text($decl, 'value');
+            if ($value->empty() == false) {
+                $out->append(' <span class="p">=</span> <span class="s">');
+                Html::escapeInto(Spell::quoted($value), $out);
+                $out->append('</span>');
+            }
+        } else if ($m->kind == 'field') {
+            if (Field::flag($decl, 'static', false)) {
+                $out->append('<span class="k">static</span> ');
+            }
+            $this->type(Field::get($decl, 'type'), $out);
+            $out->append(' <span class="v">$');
+            Html::escapeInto($m->name, $out);
+            $out->append('</span>');
+            string $value = Field::text($decl, 'default_value');
+            if ($value->empty() == false) {
+                $out->append(' <span class="p">=</span> ');
+                Spell::code($value, $out);
+            }
+        } else if ($m->kind == 'constant') {
+            $out->append('<span class="k">const</span> ');
+            string $type = Field::text($decl, 'type');
+            if ($type->empty() == false) {
+                Spell::code($type, $out);
+                $out->append(' ');
+            }
+            $out->append('<span class="n">');
+            Html::escapeInto($m->name, $out);
+            $out->append('</span>');
+            string $value = Field::text($decl, 'value');
+            if ($value->empty() == false) {
+                $out->append(' <span class="p">=</span> ');
+                Spell::code($value, $out);
+            }
+        } else {
+            $this->signature($decl, $out);
+        }
+    }
+
+    /**
+     * The same declaration as one line of plain Echo, for the Markdown
+     * pages and the signature digest: `function get(const string& $key) : Value?`.
+     */
+    public const function line(const ApiMember& $m, const json::Value& $decl) : string
+    {
+        Spell $flat = $this;
+        $flat->width = 100000;
+        string $html = '';
+        $flat->member($m, $decl, $html);
+        return Html::text($html);
+    }
+
+    /**
      * The signature of a function or method as it is declared. Parameters
      * break over lines when the signature is wider than `$width`.
      */
@@ -382,7 +502,11 @@ public struct Spell
             return;
         }
         if ($kind == 'constructor') {
-            $this->named(Field::text($fn, 'qualified'), $out);
+            if ($this->declared) {
+                $out->append('<span class="k">constructor</span>');
+            } else {
+                $this->named(Field::text($fn, 'qualified'), $out);
+            }
             $this->params($fn, $broken, $out);
             return;
         }
@@ -411,6 +535,32 @@ public struct Spell
             return $name->sub(9, $name->size() - 9);
         }
         return $name->clone();
+    }
+
+    /**
+     * `$value` as a single-quoted Echo literal, `'it\'s'`: the backslash,
+     * the quote and the line breaks escaped, so it stays one line of Echo.
+     */
+    public static function quoted(const string& $value) : string
+    {
+        string $out = "'";
+        for (usize $i = 0; $i < $value->size(); $i++) {
+            uint8 $b = $value->byte($i);
+            if ($b == 92 || $b == 39) {
+                $out->push(92);
+                $out->push($b);
+            } else if ($b == 10) {
+                $out->append('\\n');
+            } else if ($b == 13) {
+                $out->append('\\r');
+            } else if ($b == 9) {
+                $out->append('\\t');
+            } else {
+                $out->push($b);
+            }
+        }
+        $out->append("'");
+        return $out;
     }
 
     /**

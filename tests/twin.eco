@@ -1,0 +1,328 @@
+use ecodoc::md::{Document, Markdown, Relink};
+use ecodoc::site::{Links, Route};
+
+function twinLinks(string $base, string $origin) : Links
+{
+    Links $links = Links();
+    $links->base = $base;
+    $links->origin = $origin;
+    $links->page = 'guide/test.md';
+    $links->pages['guide/test.md'] = '/guide/test/';
+    $links->pages['guide/intro.md'] = '/guide/intro/';
+    $links->pages['guide/index.md'] = '/guide/';
+    $links->pages['index.md'] = '/';
+    $links->symbol('json::Value', '/api/json/Value/', 'Value');
+    $links->symbol('json::Value::get', '/api/json/Value/#get', 'Value::get()');
+    foreach ($links->pages->values() as $url) {
+        $links->twins[$url] = true;
+    }
+    $links->twins['/api/json/Value/'] = true;
+    return $links;
+}
+
+function twinIn(string $src, string $base, string $origin) : string
+{
+    Links $links = twinLinks($base, $origin);
+    Markdown $m = Markdown($links);
+    return $m->document(Document::parse($src, 1));
+}
+
+function twin(string $src) : string
+{
+    return twinIn($src, '/', '');
+}
+
+#[group: "twin"]
+test twin_route_rule
+{
+    assert(Route::markdown('/') == 'index.md');
+    assert(Route::markdown('/guide/') == 'guide.md');
+    assert(Route::markdown('/guide/intro/') == 'guide/intro.md');
+    assert(Route::markdown('/api/json/Value/') == 'api/json/Value.md');
+    assert(Route::markdown('/api/json/Value/#get') == 'api/json/Value.md');
+    assert(Route::markdown('/404.html') == '');
+}
+
+#[group: "twin"]
+test twin_page_links
+{
+    string $md = twin('[a](./intro.md#top) [b](./intro) [c](/guide/) [d](../index.md) [e](#here)');
+    echo $md;
+    assert($md == "[a](/guide/intro.md#top) [b](/guide/intro.md) [c](/guide.md) [d](/index.md) [e](#here)\n");
+}
+
+#[group: "twin"]
+test twin_base_and_origin
+{
+    string $based = twinIn('[a](./intro.md)', '/lib/', '');
+    assert($based == "[a](/lib/guide/intro.md)\n");
+    string $full = twinIn('[a](./intro.md#x) ![i](img.png)', '/lib/', 'https://e.dev/lib');
+    echo $full;
+    assert($full == "[a](https://e.dev/lib/guide/intro.md#x) ![i](https://e.dev/lib/guide/img.png)\n");
+}
+
+#[group: "twin"]
+test twin_assets_and_external
+{
+    string $md = twin('![logo](./img/logo.svg "The logo") [x](https://x.dev/a.md) <https://y.dev> https://z.dev');
+    echo $md;
+    assert($md == "![logo](/guide/img/logo.svg \"The logo\") [x](https://x.dev/a.md) <https://y.dev> https://z.dev\n");
+}
+
+#[group: "twin"]
+test twin_reference_links_inline
+{
+    string $md = twin("See [the intro][i] and [i].\n\n[i]: ./intro.md \"Intro\"");
+    echo $md;
+    assert($md == "See [the intro](/guide/intro.md \"Intro\") and [i](/guide/intro.md \"Intro\").\n");
+}
+
+#[group: "twin"]
+test twin_api_links
+{
+    string $md = twin('[](api:json::Value), [get it](api:json::Value::get), [gone](api:nope::Thing).');
+    echo $md;
+    assert($md == "[`Value`](/api/json/Value.md), [get it](/api/json/Value.md#get), gone.\n");
+}
+
+#[group: "twin"]
+test twin_api_unresolved_warns
+{
+    Links $links = twinLinks('/', '');
+    Markdown $m = Markdown($links);
+    $m->document(Document::parse('[gone](api:nope::Thing)', 1));
+    assert($links->warnings->count() == 1);
+}
+
+#[group: "twin"]
+test twin_code_and_escapes_untouched
+{
+    string $md = twin('Write `[a](./intro.md)` or \\[a](./intro.md), *em* and **strong**.');
+    echo $md;
+    assert($md == "Write `[a](./intro.md)` or \\[a](./intro.md), *em* and **strong**.\n");
+}
+
+#[group: "twin"]
+test twin_containers_become_alerts
+{
+    string $md = twin("::: tip Heads up\nRead *this*.\n:::\n\n::: danger\nNo.\n:::\n\n> [!WARNING]\n> Careful.\n\n> [!COMPILE]\n> Refused.");
+    echo $md;
+    assert($md->contains("> [!TIP]\n> **Heads up**\n>\n> Read *this*."));
+    assert($md->contains("> [!CAUTION]\n> No."));
+    assert($md->contains("> [!WARNING]\n> Careful."));
+    assert($md->contains("> [!CAUTION]\n> **Caught at compile time**\n>\n> Refused."));
+    assert($md->contains(':::') == false);
+}
+
+#[group: "twin"]
+test twin_details_unfolds
+{
+    string $md = twin("::: details Why\nBecause.\n:::");
+    echo $md;
+    assert($md == "**Why**\n\nBecause.\n");
+}
+
+#[group: "twin"]
+test twin_fences
+{
+    string $md = twin("```echo [a.eco] {1,3}:line-numbers\necho 1;  // 1\n```\n\n```md\nnested\n```\n\n````md\n```\ninner\n```\n````");
+    echo $md;
+    assert($md->contains("```echo title=\"a.eco\"\necho 1;  // 1\n```"));
+    assert($md->contains("```md\nnested\n```"));
+    assert($md->contains("````md\n```\ninner\n```\n````"));
+}
+
+#[group: "twin"]
+test twin_headings_keep_written_ids
+{
+    string $md = twin("# Title\n\nSetext\n------\n\n## Getting [started](./intro.md)\n\n### Custom {#mine}");
+    echo $md;
+    assert($md == "# Title\n\n## Setext\n\n## Getting [started](/guide/intro.md)\n\n### Custom {#mine}\n");
+}
+
+#[group: "twin"]
+test twin_lists
+{
+    string $md = twin("3. three\n4. four\n   - nested\n\n- [ ] todo\n- [x] done");
+    echo $md;
+    assert($md->contains("3. three\n4. four\n   - nested"));
+    assert($md->contains("- [ ] todo\n- [x] done"));
+}
+
+#[group: "twin"]
+test twin_loose_list
+{
+    string $md = twin("- one\n\n- two\n\n  more");
+    echo $md;
+    assert($md == "- one\n\n- two\n\n  more\n");
+}
+
+#[group: "twin"]
+test twin_tables
+{
+    string $md = twin("| Key | Value |\n|:--|--:|\n| `a\\|b` | [x](./intro.md) |");
+    echo $md;
+    assert($md == "| Key | Value |\n|:--|--:|\n| `a\\|b` | [x](/guide/intro.md) |\n");
+}
+
+#[group: "twin"]
+test twin_html_blocks
+{
+    string $md = twin("<div class=\"x\">kept</div>\n\n<script>alert(1)</script>\n\n<!-- gone -->\n\nText.");
+    echo $md;
+    assert($md == "<div class=\"x\">kept</div>\n\nText.\n");
+}
+
+#[group: "twin"]
+test twin_quotes
+{
+    string $md = twin("> One\n>\n> Two [a](./intro.md)");
+    echo $md;
+    assert($md == "> One\n>\n> Two [a](/guide/intro.md)\n");
+}
+
+#[group: "twin"]
+test twin_page_without_twin_stays_html
+{
+    Links $links = twinLinks('/', '');
+    $links->pages['guide/internal.md'] = '/guide/internal/';
+    Markdown $m = Markdown($links);
+    string $md = $m->document(Document::parse('[a](./internal.md#x) [b](./intro.md)', 1));
+    echo $md;
+    assert($md == "[a](/guide/internal/#x) [b](/guide/intro.md)\n");
+}
+
+#[group: "twin"]
+test twin_keeps_the_hash
+{
+    Links $links = twinLinks('/', 'https://e.dev');
+    assert($links->twin('/guide/#install') == 'https://e.dev/guide.md#install');
+    assert($links->twin('/nowhere/#x') == 'https://e.dev/nowhere/#x');
+}
+
+#[group: "twin"]
+test twin_empty_document
+{
+    assert(twin('') == '');
+    assert(twin("\n\n  \n") == '');
+    assert(twin('<!-- only a comment -->') == '');
+}
+
+#[group: "twin"]
+test twin_crlf
+{
+    string $md = twin("# A\r\n\r\n- x\r\n- y\r\n\r\n```sh\r\nls\r\n```\r\n");
+    echo $md;
+    assert($md == "# A\n\n- x\n- y\n\n```sh\nls\n```\n");
+}
+
+#[group: "twin"]
+test twin_setext_heading_over_lines
+{
+    string $md = twin("a\nb\n===\n\nc\nd\n---");
+    echo $md;
+    assert($md == "# a b\n\n## c d\n");
+}
+
+#[group: "twin"]
+test twin_nested_mixed_lists
+{
+    string $md = twin("- a\n  * b\n    1. c\n- d\n\n7) x\n8) y\n\n10. ten\n    more");
+    echo $md;
+    assert($md == "- a\n  - b\n    1. c\n- d\n\n7. x\n8. y\n\n10. ten\n    more\n");
+}
+
+#[group: "twin"]
+test twin_empty_items_and_rules
+{
+    string $md = twin("-\n- a\n\n***\n\n- b\n- - -");
+    echo $md;
+    assert($md == "-\n- a\n\n---\n\n- b\n\n---\n");
+}
+
+#[group: "twin"]
+test twin_quote_with_list_and_code
+{
+    string $md = twin("> - one\n> - two\n>\n> ```js\n> x\n> ```");
+    echo $md;
+    assert($md == "> - one\n> - two\n>\n> ```js\n> x\n> ```\n");
+}
+
+#[group: "twin"]
+test twin_ragged_table
+{
+    string $md = twin("| a | b |\n|---|:-:|\n| 1 |\n| 1 | 2 | 3 |\n| x \\| y | `p|q` |");
+    echo $md;
+    assert($md == "| a | b |\n|---|:-:|\n| 1 |  |\n| 1 | 2 |\n| x \\| y | `p\\|q` |\n");
+}
+
+#[group: "twin"]
+test twin_link_titles_and_odd_hrefs
+{
+    string $md = twin('[a](/u "t \\"q\\"") [b](</a b> \'x\') [c](foo(bar)) [d](a\\)b)');
+    echo $md;
+    assert($md == "[a](/u \"t \\\"q\\\"\") [b](</a b> \"x\") [c](/guide/foo(bar)) [d](</guide/a\\)b>)\n");
+}
+
+#[group: "twin"]
+test twin_destination_wraps
+{
+    assert(Relink::destination('/a b', '') == '</a b>');
+    assert(Relink::destination('/a(b', '') == '</a(b>');
+    assert(Relink::destination('/a)b(', '') == '</a)b(>');
+    assert(Relink::destination('/a(b)', 'say "hi"') == '/a(b) "say \\"hi\\""');
+}
+
+#[group: "twin"]
+test twin_fence_edges
+{
+    assert(twin("```\n```") == "```\n```\n");
+    assert(twin("````\n```\n````") == "````\n```\n````\n");
+    assert(twin("~~~ [x.txt]\nhi\n~~~") == "```txt title=\"x.txt\"\nhi\n```\n");
+    assert(twin("    indented\n    code") == "```\nindented\ncode\n```\n");
+    assert(twin("```js\nunclosed") == "```js\nunclosed\n```\n");
+}
+
+#[group: "twin"]
+test twin_empty_containers_and_alerts
+{
+    assert(twin("::: warning\n:::") == "> [!WARNING]\n");
+    assert(twin('> [!NOTE]') == "> [!NOTE]\n");
+    assert(twin("::: details\n:::") == "**Details**\n");
+    assert(twin("::: info Psst\nx\n:::") == "> [!NOTE]\n> **Psst**\n>\n> x\n");
+}
+
+#[group: "twin"]
+test twin_heading_edges
+{
+    assert(twin('#') == "#\n");
+    assert(twin('## {#id}') == "## {#id}\n");
+    assert(twin('## Use `{#x}` here {#real}') == "## Use `{#x}` here {#real}\n");
+}
+
+#[group: "twin"]
+test twin_nested_containers
+{
+    string $md = twin("::: tip\n:::: warning\ninner\n::::\nafter\n:::");
+    echo $md;
+    assert($md == "> [!TIP]\n> > [!WARNING]\n> > inner\n>\n> after\n");
+}
+
+#[group: "twin"]
+test twin_html_case_and_raw
+{
+    string $md = twin("<SCRIPT>x</SCRIPT>\n\n<Style>\na {}\n</Style>\n\n<kbd>K</kbd> *em*");
+    echo $md;
+    assert($md == "<kbd>K</kbd> *em*\n");
+}
+
+#[group: "twin"]
+test twin_bare_links
+{
+    Links $links = twinLinks('/', '');
+    Markdown $m = Markdown($links);
+    $m->bare = true;
+    string $md = $m->document(Document::parse('[the *intro*](./intro.md), [](api:json::Value), ![img](./a.png), [x](https://x.dev)', 1));
+    echo $md;
+    assert($md == "the *intro*, `Value`, img, [x](https://x.dev)\n");
+}

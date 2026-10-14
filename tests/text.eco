@@ -1,0 +1,288 @@
+use ecodoc::text::{Ascii, Html, Lines, Percent};
+use ecodoc::text::ch;
+
+#[group: "text"]
+test ascii_classes
+{
+    assert(Ascii::space(ch::SPACE));
+    assert(Ascii::space(ch::TAB));
+    assert(Ascii::space(ch::LF));
+    assert(Ascii::space(ch::CR));
+    assert(Ascii::space(12));
+    assert(Ascii::space(11) == false);
+    assert(Ascii::space(0) == false);
+    assert(Ascii::digit(ch::ZERO));
+    assert(Ascii::digit(ch::NINE));
+    assert(Ascii::digit(47) == false);
+    assert(Ascii::digit(58) == false);
+    assert(Ascii::upper(ch::UPPER_A));
+    assert(Ascii::upper(ch::UPPER_Z));
+    assert(Ascii::upper(64) == false);
+    assert(Ascii::upper(91) == false);
+    assert(Ascii::lower(ch::LOWER_A));
+    assert(Ascii::lower(ch::LOWER_Z));
+    assert(Ascii::lower(96) == false);
+    assert(Ascii::lower(123) == false);
+}
+
+#[group: "text"]
+test ascii_utf8_bytes_are_letters
+{
+    // the bytes of `é` and of an emoji lead byte
+    assert(Ascii::alpha(195));
+    assert(Ascii::alpha(169));
+    assert(Ascii::alpha(240));
+    assert(Ascii::alpha(255));
+    assert(Ascii::alpha(127) == false);
+    assert(Ascii::word(195));
+    assert(Ascii::punct(195) == false);
+    assert(Ascii::lowerByte(195) == 195);
+}
+
+#[group: "text"]
+test ascii_word_and_punct
+{
+    assert(Ascii::word(ch::UNDERSCORE));
+    assert(Ascii::word(ch::ZERO));
+    assert(Ascii::word(ch::DASH) == false);
+    assert(Ascii::word(ch::SPACE) == false);
+    // every printable byte is exactly one of letter, digit, space or punctuation
+    for (uint8 $b = 33; $b < 127; $b++) {
+        bool $p = Ascii::punct($b);
+        bool $w = Ascii::alpha($b) || Ascii::digit($b);
+        assert($p != $w);
+    }
+    assert(Ascii::punct(ch::SPACE) == false);
+    assert(Ascii::punct(127) == false);
+    assert(Ascii::punct(ch::BANG));
+    assert(Ascii::punct(ch::TILDE));
+    assert(Ascii::punct(ch::BACKTICK));
+    assert(Ascii::punct(ch::AT));
+}
+
+#[group: "text"]
+test ascii_lower_byte
+{
+    assert(Ascii::lowerByte(ch::UPPER_A) == ch::LOWER_A);
+    assert(Ascii::lowerByte(ch::UPPER_Z) == ch::LOWER_Z);
+    assert(Ascii::lowerByte(ch::AT) == ch::AT);
+    assert(Ascii::lowerByte(ch::LBRACKET) == ch::LBRACKET);
+    assert(Ascii::lowerByte(ch::LOWER_A) == ch::LOWER_A);
+    assert(Ascii::lowerByte(ch::ZERO) == ch::ZERO);
+}
+
+#[group: "text"]
+test html_escape
+{
+    assert(Html::escape('') == '');
+    assert(Html::escape('plain') == 'plain');
+    assert(Html::escape('<b>') == '&lt;b&gt;');
+    assert(Html::escape('"') == '&quot;');
+    assert(Html::escape('R&D') == 'R&amp;D');
+    assert(Html::escape("it's") == "it's");
+    assert(Html::escape('&&') == '&amp;&amp;');
+    assert(Html::escape('a<') == 'a&lt;');
+    assert(Html::escape('>a') == '&gt;a');
+    assert(Html::escape('&amp;') == '&amp;amp;');
+    assert(Html::escape('héllo <ü>') == 'héllo &lt;ü&gt;');
+}
+
+#[group: "text"]
+test html_escape_into_appends
+{
+    string $out = 'x';
+    Html::escapeInto('<y>', $out);
+    assert($out == 'x&lt;y&gt;');
+    Html::escapeInto('', $out);
+    assert($out == 'x&lt;y&gt;');
+    Html::escapeByte(ch::AMP, $out);
+    Html::escapeByte(ch::LOWER_A, $out);
+    assert($out == 'x&lt;y&gt;&amp;a');
+}
+
+#[group: "text"]
+test html_tag_name
+{
+    assert(Html::tagName('<div class="x">') == 'div');
+    assert(Html::tagName('</DIV>') == 'div');
+    assert(Html::tagName('<br/>') == 'br');
+    assert(Html::tagName("<td\tx>") == 'td');
+    assert(Html::tagName('<custom-el>') == 'custom-el');
+    assert(Html::tagName('<h1>') == 'h1');
+    assert(Html::tagName('<p') == 'p');
+    assert(Html::tagName('') == '');
+    assert(Html::tagName('<') == '');
+    assert(Html::tagName('</') == '');
+    assert(Html::tagName('div') == '');
+    assert(Html::tagName('<1>') == '');
+    assert(Html::tagName('< div>') == '');
+    assert(Html::tagName('<!-- x -->') == '');
+    assert(Html::tagName('<é>') == '');
+    assert(Html::tagName('<a.b>') == '');
+    assert(Html::tagName('<aé>') == '');
+}
+
+#[group: "text"]
+test html_tag_name_before_a_line_break
+{
+    // attributes on the next line still make a tag
+    assert(Html::tagName("<span\nclass=\"x\">") == 'span');
+    assert(Html::tagName("<script\r\nsrc=\"x\">") == 'script');
+    assert(Html::tagName("</div\n>") == 'div');
+}
+
+#[group: "text"]
+test html_block_and_raw
+{
+    assert(Html::block('div'));
+    assert(Html::block('svg'));
+    assert(Html::block('span') == false);
+    assert(Html::block('') == false);
+    assert(Html::raw('pre'));
+    assert(Html::raw('script'));
+    assert(Html::raw('div') == false);
+}
+
+#[group: "text"]
+test html_text_strips_tags
+{
+    assert(Html::text('') == '');
+    assert(Html::text('<b>R&amp;D</b>') == 'R&D');
+    assert(Html::text("<p>a</p>\n<p>b</p>") == 'a b');
+    assert(Html::text("  lead\n\n  trail  ") == 'lead trail');
+    assert(Html::text('&lt;tag&gt; &quot;q&quot; &#39;s&apos;') == "<tag> \"q\" 's'");
+    assert(Html::text('a&nbsp;b') == 'a b');
+    assert(Html::text('héllo <i>wörld</i>') == 'héllo wörld');
+}
+
+#[group: "text"]
+test html_text_leaves_unknown_entities
+{
+    assert(Html::text('&copy;') == '&copy;');
+    assert(Html::text('a & b') == 'a & b');
+    assert(Html::text('&') == '&');
+    assert(Html::text('a&') == 'a&');
+    // a `;` too far away is no entity
+    assert(Html::text('&verylongname;') == '&verylongname;');
+    assert(Html::text('&amp') == '&amp');
+}
+
+#[group: "text"]
+test html_text_unclosed_tag
+{
+    assert(Html::text('a <b') == 'a');
+    assert(Html::text('<') == '');
+}
+
+#[group: "text"]
+test lines_split
+{
+    array<string> $one = Lines::split('');
+    assert($one->count() == 1);
+    assert($one[0] == '');
+
+    array<string> $l = Lines::split("a\nb\r\n\nc\n");
+    assert($l->count() == 5);
+    assert($l[0] == 'a');
+    assert($l[1] == 'b');
+    assert($l[2] == '');
+    assert($l[3] == 'c');
+    assert($l[4] == '');
+
+    array<string> $cr = Lines::split("\r");
+    assert($cr->count() == 1);
+    assert($cr[0] == '');
+}
+
+#[group: "text"]
+test lines_split_untabs_indent
+{
+    array<string> $l = Lines::split("\tx\n \ty\n  \t\tz\n    \tw\na\tb");
+    assert($l[0] == '    x');
+    assert($l[1] == '    y');
+    assert($l[2] == '        z');
+    assert($l[3] == '        w');
+    // tabs past the indentation stay
+    assert($l[4] == "a\tb");
+    array<string> $mid = Lines::split(" \tx\ty");
+    assert($mid[0] == "    x\ty");
+    array<string> $only = Lines::split("\t");
+    assert($only[0] == '    ');
+}
+
+#[group: "text"]
+test lines_at
+{
+    assert(Lines::at('abc', 0, 'ab'));
+    assert(Lines::at('abc', 1, 'bc'));
+    assert(Lines::at('abc', 1, 'bcd') == false);
+    assert(Lines::at('abc', 3, ''));
+    assert(Lines::at('abc', 3, 'c') == false);
+    assert(Lines::at('abc', 4, '') == false);
+    assert(Lines::at('abc', 99, 'a') == false);
+    assert(Lines::at('', 0, ''));
+    assert(Lines::at('', 0, 'a') == false);
+}
+
+#[group: "text"]
+test lines_indent_blank_dedent
+{
+    assert(Lines::indent('') == 0);
+    assert(Lines::indent('   x') == 3);
+    assert(Lines::indent('    ') == 4);
+    assert(Lines::blank(''));
+    assert(Lines::blank('   '));
+    assert(Lines::blank(' x ') == false);
+    assert(Lines::dedent('     x', 2) == '   x');
+    assert(Lines::dedent('  x', 4) == 'x');
+    assert(Lines::dedent('x', 4) == 'x');
+    assert(Lines::dedent('', 4) == '');
+    assert(Lines::dedent('    ', 2) == '  ');
+    assert(Lines::dedent('  x', 0) == '  x');
+}
+
+#[group: "text"]
+test lines_run_and_only
+{
+    assert(Lines::run('```x', 0, ch::BACKTICK) == 3);
+    assert(Lines::run('a```', 1, ch::BACKTICK) == 3);
+    assert(Lines::run('abc', 0, ch::BACKTICK) == 0);
+    assert(Lines::run('abc', 3, ch::LOWER_A) == 0);
+    assert(Lines::run('', 0, ch::DASH) == 0);
+    assert(Lines::only('---', ch::DASH, 3));
+    assert(Lines::only(' - - - ', ch::DASH, 3));
+    assert(Lines::only("-\t-\t-", ch::DASH, 3));
+    assert(Lines::only('--', ch::DASH, 3) == false);
+    assert(Lines::only('---x', ch::DASH, 3) == false);
+    assert(Lines::only('', ch::DASH, 1) == false);
+    assert(Lines::only('', ch::DASH, 0));
+}
+
+#[group: "text"]
+test lines_one_line
+{
+    assert(Lines::oneLine('') == '');
+    assert(Lines::oneLine("  a\nb  ") == 'a b');
+    assert(Lines::oneLine("a\nb\nc") == 'a b c');
+    assert(Lines::oneLine("\n\nx\n\n") == 'x');
+}
+
+#[group: "text"]
+test percent_decode
+{
+    assert(Percent::decode('') == '');
+    assert(Percent::decode('guide/my%20page/') == 'guide/my page/');
+    assert(Percent::decode('100%') == '100%');
+    assert(Percent::decode('%') == '%');
+    assert(Percent::decode('%2') == '%2');
+    assert(Percent::decode('%20') == ' ');
+    assert(Percent::decode('a%2') == 'a%2');
+    assert(Percent::decode('%zz') == '%zz');
+    assert(Percent::decode('%2g') == '%2g');
+    assert(Percent::decode('%%41') == '%A');
+    assert(Percent::decode('%4a%4A') == 'JJ');
+    assert(Percent::decode('%2520') == '%20');
+    // a multibyte escape comes back as its UTF-8 bytes
+    assert(Percent::decode('caf%C3%A9') == 'café');
+    assert(Percent::decode('café') == 'café');
+}

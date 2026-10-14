@@ -32,6 +32,7 @@ prev: false
 | `sidebar` | `false` hides the sidebar |
 | `prev` / `next` | `false`, a title, or `{ text, link }` |
 | `editLink` | `false` hides "Edit this page" |
+| `llms` | `false` leaves the page out of everything written [for agents](./agents.md) |
 
 ## Links
 

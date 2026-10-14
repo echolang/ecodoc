@@ -41,6 +41,18 @@ public class Links
     public map<string, string> $pages = map<string, string>();
 
     /**
+     * The page URLs (`/guide/intro/`) that get a Markdown twin. A page kept
+     * from agents has none, so links to it stay on its HTML.
+     */
+    public map<string, bool> $twins = map<string, bool>();
+
+    /**
+     * The published root of the site, `https://echolang.github.io/ecodoc`,
+     * without a trailing slash. Empty when the manifest names no `url`.
+     */
+    public string $origin = '';
+
+    /**
      * Qualified symbol name to its URL (with the anchor).
      */
     public map<string, string> $symbols = map<string, string>();
@@ -88,10 +100,55 @@ public class Links
      */
     public const function url(const string& $url) : string
     {
-        if ($this->base == '/' || $url->starts('/') == false) {
+        // a protocol-relative `//host/x` starts with a slash but leaves the site
+        if ($this->base == '/' || $url->starts('/') == false || Links::external($url)) {
             return $url->clone();
         }
         return "{$this->base}{$url->sub(1, $url->size() - 1)}";
+    }
+
+    /**
+     * `$url` (rooted at `/`) as a full URL when the origin is known, else under the base.
+     */
+    public const function absolute(const string& $url) : string
+    {
+        if ($this->origin->empty() || $url->starts('/') == false || Links::external($url)) {
+            return $this->url($url);
+        }
+        return "{$this->origin}{$url}";
+    }
+
+    /**
+     * The URL of the Markdown twin of the page at `$url`, its hash kept:
+     * `/guide/intro/#top` is `/guide/intro.md#top`. A URL without a twin in
+     * `$twins` (a file, a page kept from agents) stays itself, and so does
+     * a full URL to another site.
+     */
+    public const function twin(const string& $url) : string
+    {
+        if (Links::external($url)) {
+            return $url->clone();
+        }
+        string $path = Route::path($url);
+        string $hash = $url->sub($path->size(), $url->size() - $path->size());
+        string $md = Route::markdown($path);
+        if ($md->empty() || $this->twins->has($path) == false) {
+            return $this->absolute($url);
+        }
+        string $twin = $this->absolute("/{$md}");
+        return "{$twin}{$hash}";
+    }
+
+    /**
+     * The one way out of `href()`: the HTML URL, or for a twin the twin of a
+     * page and the plain URL of anything else.
+     */
+    private const function emit(const string& $url, const string& $tail, bool $twin) : string
+    {
+        if ($twin) {
+            return "{$this->twin($url)}{$tail}";
+        }
+        return "{$this->url($url)}{$tail}";
     }
 
     /**
@@ -159,7 +216,8 @@ public class Links
     }
 
     /**
-     * The URL for `api:<target>`. Null, and a warning, when it does not resolve.
+     * The site path for `api:<target>` with its anchor, `/api/json/Value/#get`,
+     * before the base. Null, and a warning, when it does not resolve.
      */
     public function api(const string& $target) : string?
     {
@@ -167,7 +225,7 @@ public class Links
             $this->warn("unresolved symbol 'api:{$target}'");
             return null;
         };
-        return $this->url($this->symbols->get($q));
+        return $this->symbols->get($q);
     }
 
     /**
@@ -191,11 +249,30 @@ public class Links
      */
     public function href(const string& $raw) : string
     {
+        return $this->resolveHref($raw, false);
+    }
+
+    /**
+     * `href()` for a Markdown twin: a page becomes its `.md` twin
+     * (`/guide/intro.md#top`), everything else its plain URL, absolute when
+     * `$origin` is known.
+     */
+    public function twinHref(const string& $raw) : string
+    {
+        return $this->resolveHref($raw, true);
+    }
+
+    private function resolveHref(const string& $raw, bool $twin) : string
+    {
         string $dest = str::trim($raw);
         if ($dest->starts('api:')) {
-            return $this->api($dest->sub(4, $dest->size() - 4)) ?? '';
+            string $symbol = guard $this->api($dest->sub(4, $dest->size() - 4)) else {
+                return '';
+            };
+            return $this->emit($symbol, '', $twin);
         }
-        if ($dest->empty() || $dest->starts('#') || Links::external($dest) || $dest->starts('mailto:') || $dest->starts('tel:')) {
+        // a bare `?query` or `#hash` stays on the page it was written on
+        if ($dest->empty() || $dest->starts('#') || $dest->starts('?') || Links::external($dest) || $dest->starts('mailto:') || $dest->starts('tel:')) {
             return $dest;
         }
 
@@ -217,7 +294,7 @@ public class Links
 
         // an API page's links are site paths already
         if ($this->page->starts('/')) {
-            return "{$this->url($path)}{$tail}";
+            return $this->emit($path, $tail, $twin);
         }
 
         string $resolved = '';
@@ -229,21 +306,21 @@ public class Links
 
         if ($path->ends('.md')) {
             if ($this->pages->has($resolved)) {
-                return "{$this->url($this->pages->get($resolved))}{$tail}";
+                return $this->emit($this->pages->get($resolved), $tail, $twin);
             }
             $this->warn("dead link '{$dest}'");
-            return "{$this->url(Route::forPage($resolved))}{$tail}";
+            return $this->emit(Route::forPage($resolved), $tail, $twin);
         }
 
         // a page named without its extension, `./intro` or `/guide/intro`
         if (Path::ext($resolved)->empty() && $path->ends('/') == false) {
             string $md = "{$resolved}.md";
             if ($this->pages->has($md)) {
-                return "{$this->url($this->pages->get($md))}{$tail}";
+                return $this->emit($this->pages->get($md), $tail, $twin);
             }
             string $index = Path::join($resolved, 'index.md');
             if ($this->pages->has($index)) {
-                return "{$this->url($this->pages->get($index))}{$tail}";
+                return $this->emit($this->pages->get($index), $tail, $twin);
             }
         }
 
@@ -253,18 +330,18 @@ public class Links
                 $index = 'index.md';
             }
             if ($this->pages->has($index)) {
-                return "{$this->url($this->pages->get($index))}{$tail}";
+                return $this->emit($this->pages->get($index), $tail, $twin);
             }
             if ($path->starts('/')) {
-                return "{$this->url($path)}{$tail}";
+                return $this->emit($path, $tail, $twin);
             }
         }
 
         if ($resolved == '.') {
-            return "{$this->url('/')}{$tail}";
+            return $this->emit('/', $tail, $twin);
         }
         string $rooted = "/{$resolved}";
-        return "{$this->url($rooted)}{$tail}";
+        return $this->emit($rooted, $tail, $twin);
     }
 
     /**
