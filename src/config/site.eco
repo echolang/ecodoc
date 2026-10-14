@@ -1,0 +1,300 @@
+/*
+ * `docs/docs.eco`, turned into a `Site`.
+ */
+
+namespace ecodoc::config;
+
+use ecodoc::site::Route;
+use ecodoc::sys::{Path, Run, Sys};
+
+/**
+ * What `#[docs::api: {...}]` asks for.
+ */
+public struct ApiConfig
+{
+    /**
+     * Whether the site has an API reference at all. True as soon as
+     * `#[docs::api:]` is there, even as a bare `true`.
+     */
+    public bool $enabled = false;
+
+    /**
+     * The library's manifest, relative to the docs folder.
+     */
+    public string $manifest = '../module.eco';
+
+    /**
+     * The lowest visibility shown: `public` (the default) or `internal`.
+     */
+    public string $visibility = 'public';
+
+    /**
+     * Turn inline code that names a symbol into a link to it.
+     */
+    public bool $autolink = true;
+
+    /**
+     * Include dependencies and the standard library (`--decls-all`).
+     */
+    public bool $all = false;
+
+    /**
+     * Only these modules. Empty means every module of the library.
+     */
+    public array<string> $modules = array<string>();
+
+    /**
+     * Where the reference lives, `/api/`.
+     */
+    public string $base = '/api/';
+
+    /**
+     * The sidebar title of the reference.
+     */
+    public string $title = 'API';
+}
+
+/**
+ * The site, as `docs/docs.eco` describes it. The manifest is Echo: tool
+ * attributes in the `docs` namespace, read through `echoc -p manifest` so the
+ * compiler owns the syntax and ecodoc only reads values.
+ *
+ * ```echo
+ * #[module: "docs"]
+ * #[docs::title: "libjson"]
+ * #[docs::nav: [{ text: "Guide", link: "/guide/" }, { text: "API", link: "/api/" }]]
+ * #[docs::api: { manifest: "../module.eco" }]
+ * ```
+ *
+ * I used Echo instead of a `config.json` because the docs live next to an Echo
+ * library, and echoc already parses attributes, records and lists. A typo in
+ * the manifest is a compiler error with a line number. When echoc grows, the
+ * manifest grows with it. Every property maps to one `#[docs::<name>:]` attribute.
+ */
+public class Site
+{
+    /**
+     * The site name, in the top bar and every page title. When it is empty
+     * the library's module name is used, then the folder name.
+     */
+    public string $title = '';
+
+    /**
+     * One sentence about the library. The home hero uses it when the page
+     * has no tagline, and it is the lede of the API index.
+     */
+    public string $description = '';
+
+    /**
+     * Shown next to the title. With an API reference and no version written,
+     * the library's `#[version:]` with a `v` in front.
+     */
+    public string $version = '';
+
+    /**
+     * An image path, relative to the site root, shown before the title.
+     */
+    public string $logo = '';
+
+    /**
+     * The path the site is served under, `/` or `/<name>/` below the domain root.
+     * Always starts and ends with `/`.
+     */
+    public string $base = '/';
+
+    /**
+     * The repository URL, for the icon in the top bar.
+     */
+    public string $repo = '';
+
+    /**
+     * The "Edit this page" URL, with `{path}` where the page's source path goes.
+     */
+    public string $edit = '';
+
+    /**
+     * The URL source files are linked under from the API reference, with
+     * `#L<line>` appended for each declaration.
+     */
+    public string $source = '';
+
+    /**
+     * `dark`, `light`, or `auto` (the reader's system setting).
+     */
+    public string $theme = 'auto';
+
+    /**
+     * The `<html lang>` of every page.
+     */
+    public string $lang = 'en';
+
+    /**
+     * The footer's message, plain text.
+     */
+    public string $footer = '';
+
+    /**
+     * The footer's copyright, from `footer: { copyright: "..." }`, after the message.
+     */
+    public string $copyright = '';
+
+    /**
+     * The links in the top bar, left to right.
+     */
+    public array<NavLink> $nav = array<NavLink>();
+
+    /**
+     * One sidebar per base, the API sidebar included after `build()` adds it.
+     */
+    public array<Sidebar> $sidebars = array<Sidebar>();
+
+    /**
+     * The API reference settings. `$enabled` is false without `#[docs::api:]`.
+     */
+    public ApiConfig $api = ApiConfig();
+
+    /**
+     * Every `docs::` attribute as written, for anything a theme wants that ecodoc does not model.
+     */
+    public json::Value $raw = json::object();
+
+    /**
+     * Read `<docs>/docs.eco` through `echoc -p manifest`.
+     */
+    public static function load(const string& $echoc, const string& $docs) : result<Site, Failure>
+    {
+        string $manifest = Path::join($docs, 'docs.eco');
+        if (Sys::isFile($manifest) == false) {
+            return .error(.manifest("no docs.eco in {$docs} (run `ecodoc init` to create one)"));
+        }
+        array<string> $argv = [$echoc, 'run', '-p', 'manifest', '-m', $manifest];
+        Run $run = Sys::run($argv);
+        if ($run->ok() == false) {
+            return .error(.tool('echoc -p manifest', $run->code));
+        }
+        json::Value $printed = guard json::parse($run->out) else ($e) {
+            return .error(.manifest("echoc printed something that is not JSON: {$e}"));
+        };
+        return .ok(Site::from(Field::tools($printed, 'docs')));
+    }
+
+    /**
+     * A site from the `docs::` attributes, already plain JSON.
+     */
+    public static function from(const json::Value& $d) : Site
+    {
+        Site $s = Site();
+        $s->raw = $d->clone();
+        $s->title = Field::text($d, 'title');
+        $s->description = Field::text($d, 'description');
+        $s->version = Field::text($d, 'version');
+        $s->logo = Field::text($d, 'logo');
+        $s->repo = Field::text($d, 'repo');
+        $s->edit = Field::text($d, 'edit');
+        $s->source = Field::text($d, 'source');
+        $s->lang = Field::text($d, 'lang');
+        if ($s->lang->empty()) {
+            $s->lang = 'en';
+        }
+        string $theme = Field::text($d, 'theme');
+        if ($theme == 'dark' || $theme == 'light') {
+            $s->theme = $theme;
+        }
+        string $base = Field::text($d, 'base');
+        if ($base->empty() == false) {
+            $s->base = Route::base($base);
+        }
+
+        json::Value $footer = Field::get($d, 'footer');
+        if ($footer->isStr()) {
+            $s->footer = $footer->asStr() ?? '';
+        } else {
+            $s->footer = Field::text($footer, 'message');
+            $s->copyright = Field::text($footer, 'copyright');
+        }
+
+        foreach (Field::items($d, 'nav') as $n) {
+            string $link = Route::link(Field::text($n, 'link'));
+            string $prefix = Field::text($n, 'prefix');
+            if ($prefix->empty()) {
+                $prefix = Route::section($link);
+            }
+            $s->nav->push(NavLink(Field::text($n, 'text'), $link, $prefix));
+        }
+
+        json::Value $bars = Field::get($d, 'sidebar');
+        if ($bars->isArray()) {
+            foreach ($bars->asArray() ?? array<json::Value>() as $bar) {
+                Sidebar $side = Sidebar();
+                $side->base = Route::link(Field::text($bar, 'base'));
+                if ($side->base->empty()) {
+                    $side->base = '/';
+                }
+                // a bare list of entries is the sidebar for every page
+                if (Field::has($bar, 'items') && Field::has($bar, 'base')) {
+                    foreach (Field::items($bar, 'items') as $item) {
+                        $side->items->push(SidebarItem::read($item));
+                    }
+                } else {
+                    $side->items->push(SidebarItem::read($bar));
+                }
+                Site::addSidebar($s, $side);
+            }
+        }
+
+        json::Value $api = Field::get($d, 'api');
+        if ($api->isObject() || ($api->asBool() ?? false)) {
+            $s->api->enabled = true;
+            string $manifest = Field::text($api, 'manifest');
+            if ($manifest->empty() == false) {
+                $s->api->manifest = $manifest;
+            }
+            string $vis = Field::text($api, 'visibility');
+            if ($vis == 'internal' || $vis == 'private') {
+                $s->api->visibility = $vis;
+            }
+            $s->api->autolink = Field::flag($api, 'autolink', true);
+            $s->api->all = Field::flag($api, 'all', false);
+            $s->api->modules = Field::strings($api, 'modules');
+            string $apiBase = Field::text($api, 'base');
+            if ($apiBase->empty() == false) {
+                $s->api->base = Route::link($apiBase);
+            }
+            string $apiTitle = Field::text($api, 'title');
+            if ($apiTitle->empty() == false) {
+                $s->api->title = $apiTitle;
+            }
+        }
+        return $s;
+    }
+
+    /**
+     * Sidebars for the same base merge, so a site can list its groups one attribute at a time.
+     */
+    private static function addSidebar(Site& $s, Sidebar $side) : void
+    {
+        foreach ($s->sidebars as $existing) {
+            if ($existing->base == $side->base) {
+                $existing->items->extend($side->items);
+                return;
+            }
+        }
+        $s->sidebars->push($side);
+    }
+
+    /**
+     * The sidebar whose base is the longest prefix of `$url`.
+     */
+    public const function sidebarFor(const string& $url) : Sidebar?
+    {
+        Sidebar? $best = null;
+        usize $bestLen = 0;
+        foreach ($this->sidebars as $side) {
+            if ($url->starts($side->base) && ($best == null || $side->base->size() > $bestLen)) {
+                $best = $side;
+                $bestLen = $side->base->size();
+            }
+        }
+        return $best;
+    }
+}

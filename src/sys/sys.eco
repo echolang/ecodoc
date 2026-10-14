@@ -1,0 +1,302 @@
+/*
+ * Process, filesystem and walk helpers, backed by `c/sys.c`.
+ */
+
+namespace ecodoc::sys;
+
+use std::io;
+
+internal extern {
+    function ecodoc_run(ptr<const uint8> $packed, int32 $argc, ptr<ptr<uint8>> $out, ptr<uint64> $len) : int32;
+    function ecodoc_free(ptr<uint8> $p) : void;
+    function ecodoc_mtime(ptr<const uint8> $path) : int64;
+    function ecodoc_kind(ptr<const uint8> $path) : int32;
+}
+
+/**
+ * A finished child process: its exit status and everything it wrote to
+ * stdout. stderr is not captured, it reached the terminal as it was written.
+ */
+public struct Run
+{
+    /**
+     * The exit status. `127` when the program was not found, `-1` when the
+     * child process could not even be created.
+     */
+    public int32 $code;
+
+    /**
+     * Everything the program wrote to stdout.
+     */
+    public string $out;
+
+    /**
+     * Whether the program exited with `0`.
+     */
+    public const function ok() : bool
+    {
+        return $this->code == 0;
+    }
+}
+
+/**
+ * The OS calls std does not have yet, backed by a few lines of C in `c/sys.c`.
+ *
+ * ```echo
+ * Run $r = Sys::run(['ls', 'docs']);
+ * echo $r->ok();                      // true
+ * echo Sys::isDir('docs');            // true
+ * echo Sys::isFile('docs/docs.eco');  // true
+ * ```
+ *
+ * I kept the C dance internal: you pass a path as a plain string. When std
+ * grows these, this struct goes away.
+ */
+public struct Sys
+{
+    /**
+     * Run `$argv` with no shell. The program is looked up on `PATH`. stdout
+     * is captured, stderr passes through.
+     *
+     * No shell means no quoting problems: a path with a space in it is one
+     * argument, because it is one string in the array.
+     *
+     * @param $argv The program and its arguments. The program is looked up on `PATH`.
+     * @return The exit status and the captured stdout. stderr already passed through.
+     */
+    public static function run(const array<string>& $argv) : Run
+    {
+        string $packed = '';
+        foreach ($argv as $a) {
+            $packed->append($a);
+            $packed->push(0);
+        }
+        ptr<uint8> $out = null;
+        uint64 $len = 0;
+        int32 $code = ecodoc_run($packed->data(), $argv->count() as int32, &$out, &$len);
+        if ($out:$ == null) {
+            return Run(-1, '');
+        }
+        string $text = str::from($out:$ as ptr<const uint8>, $len as usize);
+        ecodoc_free($out:$);
+        return Run($code, $text);
+    }
+
+    /**
+     * Nanoseconds since the epoch the file was last written, or -1 when missing.
+     */
+    public static function mtime(const string& $path) : int64
+    {
+        string $p = $path->clone();
+        return ecodoc_mtime($p->cstr());
+    }
+
+    /**
+     * Whether `$path` exists and is a regular file. A directory is not.
+     */
+    public static function isFile(const string& $path) : bool
+    {
+        string $p = $path->clone();
+        return ecodoc_kind($p->cstr()) == 1;
+    }
+
+    /**
+     * Whether `$path` exists and is a directory.
+     */
+    public static function isDir(const string& $path) : bool
+    {
+        string $p = $path->clone();
+        return ecodoc_kind($p->cstr()) == 2;
+    }
+
+    /**
+     * Create `$path` and every missing parent.
+     */
+    public static function mkdirs(const string& $path) : void
+    {
+        string $at = '';
+        foreach (str::split($path, '/')->owned() as $part) {
+            if ($at->empty() == false || $path->starts('/')) {
+                $at->append('/');
+            }
+            $at->append($part);
+            if ($part->empty() || $part == '.' || Sys::isDir($at)) {
+                continue;
+            }
+            io::mkdir($at);
+        }
+    }
+
+    /**
+     * Write `$text` to `$path`, creating the directories above it. Unchanged
+     * files are left alone so a watcher does not see them move.
+     */
+    public static function put(const string& $path, const string& $text) : bool
+    {
+        if (Sys::isFile($path)) {
+            string $old = guard io::readfile($path) else {
+                return false;
+            };
+            if ($old == $text) {
+                return true;
+            }
+        } else {
+            Sys::mkdirs(Path::dir($path));
+        }
+        guard io::writefile($path, $text) else {
+            return false;
+        };
+        return true;
+    }
+
+    /**
+     * Copy a file byte for byte. False when it could not be read or written.
+     */
+    public static function copy(const string& $from, const string& $to) : bool
+    {
+        string $bytes = guard io::readfile($from) else {
+            return false;
+        };
+        return Sys::put($to, $bytes);
+    }
+
+    /**
+     * Delete `$path` and everything below it. Used on the output directory
+     * only, so it refuses a path that is empty or the filesystem root.
+     */
+    public static function purge(const string& $path) : void
+    {
+        if ($path->empty() || $path == '/' || $path == '.') {
+            return;
+        }
+        if (Sys::isDir($path) == false) {
+            if (Sys::isFile($path)) {
+                io::remove($path);
+            }
+            return;
+        }
+        io::dir $entries = guard io::opendir($path) else {
+            return;
+        };
+        array<string> $dirs = array<string>();
+        foreach ($entries as $e) {
+            if ($e->is_directory()) {
+                $dirs->push($e->path());
+            } else {
+                io::remove($e->path());
+            }
+        }
+        foreach ($dirs as $d) {
+            Sys::purge($d);
+        }
+        io::rmdir($path);
+    }
+}
+
+/**
+ * A recursive listing of the files under a directory, as paths relative to
+ * it, sorted so a build is the same on every machine.
+ */
+public struct Walk
+{
+    /**
+     * Every file below `$root` whose name ends in `$suffix`, relative to
+     * `$root` and sorted. An empty `$suffix` keeps every file. `$skip` is
+     * directory names not to enter, at any depth.
+     *
+     * ```echo
+     * Walk::files('docs', '.md', ['dist']);  // ["guide/api.md", "guide/cli.md", ..., "index.md"]
+     * ```
+     *
+     * Directories starting with `.` or `_` are never entered, so `.ecodoc/`
+     * and a `_drafts/` folder stay out of the site. Files starting with `.`
+     * are skipped too. The walk stops 32 levels down, which is deep enough
+     * for docs and shallow enough to survive a symlink loop.
+     *
+     * @param $root The directory to walk.
+     * @param $suffix The file name ending to keep, like `.md`. Empty keeps every file.
+     * @param $skip Directory names not to enter, at any depth.
+     */
+    public static function files(const string& $root, const string& $suffix, const array<string>& $skip) : array<string>
+    {
+        array<string> $found = array<string>();
+        Walk::into($root, '', $suffix, $skip, $found, 0);
+        $found->sort();
+        return $found;
+    }
+
+    /**
+     * The directories no walk enters: build output and installed packages.
+     */
+    public static function ignored() : array<string>
+    {
+        array<string> $names = ['dist', 'node_modules', 'vendor', 'ecobuild'];
+        return $names;
+    }
+
+    /**
+     * A number that changes when a file below `$root` is added, removed or
+     * modified: the modification times of `files()` folded together.
+     */
+    public static function stamp(const string& $root, const string& $suffix, const array<string>& $skip) : int64
+    {
+        int64 $sum = 0;
+        int64 $count = 0;
+        foreach (Walk::files($root, $suffix, $skip) as $rel) {
+            $sum = $sum + Sys::mtime(Path::join($root, $rel)) % 1000000007 * 31 + 7;
+            $count = $count + 1;
+        }
+        return $sum + $count * 1000003;
+    }
+
+    private static function into(
+        const string& $root,
+        const string& $rel,
+        const string& $suffix,
+        const array<string>& $skip,
+        array<string>& $found,
+        int32 $depth
+    ) : void
+    {
+        if ($depth > 32) {
+            return;
+        }
+        string $dir = $root->clone();
+        if ($rel->empty() == false) {
+            $dir = Path::join($root, $rel);
+        }
+        io::dir $entries = guard io::opendir($dir) else {
+            return;
+        };
+        foreach ($entries as $e) {
+            string $name = $e->name();
+            string $child = $name->clone();
+            if ($rel->empty() == false) {
+                $child = "{$rel}/{$name}";
+            }
+            if ($e->is_directory()) {
+                if ($name->starts('.') || $name->starts('_') || Walk::skipped($name, $skip)) {
+                    continue;
+                }
+                Walk::into($root, $child, $suffix, $skip, $found, $depth + 1);
+                continue;
+            }
+            if ($name->starts('.')) {
+                continue;
+            }
+            if ($suffix->empty() || $name->ends($suffix)) {
+                $found->push($child);
+            }
+        }
+    }
+
+    private static function skipped(const string& $name, const array<string>& $skip) : bool
+    {
+        foreach ($skip as $s) {
+            if ($s == $name) {
+                return true;
+            }
+        }
+        return false;
+    }
+}

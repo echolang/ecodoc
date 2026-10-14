@@ -1,0 +1,7 @@
+ecobuild/
+vendor/
+hello
+
+bench/bin/
+bench/results/
+bench/echo/ecobuild/

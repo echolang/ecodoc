@@ -1,0 +1,83 @@
+namespace ecodoc::cli;
+
+use std::io;
+use ecodoc::sys::{Path, Sys};
+
+/**
+ * `ecodoc init`: a docs folder to start from. The manifest documents the
+ * library one directory up when there is one. Files that are already there stay as they are.
+ */
+public struct Scaffold
+{
+    /**
+     * Write `docs.eco`, `index.md`, `guide/index.md` and a `.gitignore` into `$docs`.
+     *
+     * Run it twice and the second run only prints `kept` four times. A file
+     * that is already there is never touched, so `init` is safe to run in a
+     * docs folder you have been writing in for a month.
+     *
+     * When `$docs/../module.eco` exists, the manifest gets an API entry in
+     * the nav and a `#[docs::api:]` pointing at it. Without one you get a guide-only site.
+     *
+     * @param $docs Where to write the four files, relative to the working directory.
+     * @return `.ok`, or `.io` naming the first file that could not be written.
+     */
+    public static function create(const string& $docs) : status<Failure>
+    {
+        string $root = Path::dir(Path::normalize(Builder::absolute($docs)));
+        string $name = Path::base($root);
+        bool $library = Sys::isFile(Path::join($root, 'module.eco'));
+        Sys::mkdirs(Path::join($docs, 'guide'));
+
+        string $manifest = '';
+        $manifest->append("/*\n * The docs site of {$name}, read by ecodoc.\n */\n\n#[module: \"docs\"]\n\n");
+        $manifest->append("#[docs::title: \"{$name}\"]\n");
+        $manifest->append("#[docs::description: \"[ONE LINE ABOUT {$name}]\"]\n");
+        $manifest->append("// #[docs::repo: \"https://github.com/[OWNER]/{$name}\"]\n");
+        $manifest->append("// #[docs::edit: \"https://github.com/[OWNER]/{$name}/edit/main/docs/\{path}\"]\n\n");
+        if ($library) {
+            $manifest->append("#[docs::nav: [{ text: \"Guide\", link: \"/guide/\" }, { text: \"API\", link: \"/api/\" }]]\n");
+        } else {
+            $manifest->append("#[docs::nav: [{ text: \"Guide\", link: \"/guide/\" }]]\n");
+        }
+        $manifest->append("#[docs::sidebar: [{ base: \"/guide/\", items: [{ text: \"Introduction\", items: [{ text: \"Getting started\", link: \"/guide/\" }] }] }]]\n");
+        if ($library) {
+            $manifest->append("\n// the reference, from the library's own declarations\n#[docs::api: { manifest: \"../module.eco\" }]\n");
+        }
+        guard Scaffold::put(Path::join($docs, 'docs.eco'), $manifest) else ($e) {
+            return .error($e);
+        };
+
+        string $index = '';
+        $index->append("---\nlayout: home\nhero:\n  name: {$name}\n  text: [WHAT IT IS, IN FIVE WORDS]\n  tagline: [THE ONE SENTENCE A READER NEEDS]\n  actions:\n    - theme: brand\n      text: Get started\n      link: /guide/\n");
+        if ($library) {
+            $index->append("    - text: API reference\n      link: /api/\n");
+        }
+        $index->append("features:\n  - title: [FIRST REASON]\n    details: [WHY IT MATTERS]\n  - title: [SECOND REASON]\n    details: [WHY IT MATTERS]\n---\n");
+        guard Scaffold::put(Path::join($docs, 'index.md'), $index) else ($e) {
+            return .error($e);
+        };
+
+        string $guide = "# Getting started\n\n[WHAT A READER DOES FIRST]\n\n```echo\necho 'hello';  // hello\n```\n";
+        guard Scaffold::put(Path::join($docs, 'guide/index.md'), $guide) else ($e) {
+            return .error($e);
+        };
+        guard Scaffold::put(Path::join($docs, '.gitignore'), "dist/\n") else ($e) {
+            return .error($e);
+        };
+        return .ok;
+    }
+
+    private static function put(const string& $path, const string& $text) : status<Failure>
+    {
+        if (Sys::isFile($path)) {
+            io::println("ecodoc: kept {$path}");
+            return .ok;
+        }
+        if (Sys::put($path, $text) == false) {
+            return .error(.io($path));
+        }
+        io::println("ecodoc: wrote {$path}");
+        return .ok;
+    }
+}

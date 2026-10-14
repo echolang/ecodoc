@@ -1,0 +1,214 @@
+namespace ecodoc::api;
+
+use ecodoc::hl::Lang;
+use ecodoc::md::Fence;
+use ecodoc::text::Lines;
+
+/**
+ * One `@param` line: the name and what was written after it.
+ */
+public struct ParamDoc
+{
+    /**
+     * The parameter name as written, `$port`.
+     */
+    public string $name;
+
+    /**
+     * The rest of the line, inline Markdown.
+     */
+    public string $text;
+}
+
+/**
+ * A docblock as echoc hands it over, `/** ... *\/` with its ` * ` prefixes,
+ * turned into the Markdown it holds. The first paragraph is the summary
+ * (cards, search, the hero lede); the first ```echo fence is the example; the
+ * rare `@param` and `@return` tags become a parameter table.
+ *
+ * ```echo
+ * string $s = "Halve it.\n\nOdd fails.\n";
+ * $s->append("@param $n Even.\n");
+ * $s->append("@return Half.");
+ * Docblock $d = Docblock::parse($s);
+ * echo $d->summary;          // Halve it.
+ * echo $d->rest;             // Odd fails.
+ * echo $d->params[0]->name;  // $n
+ * echo $d->params[0]->text;  // Even.
+ * echo $d->returns;          // Half.
+ * ```
+ *
+ * A docblock is Markdown, the same dialect as the guide pages. I kept
+ * `@param` and `@return` for the few functions whose arguments need a word
+ * each: the signature already has the types, so a tag only says what the type cannot.
+ */
+public class Docblock
+{
+    /**
+     * The whole text, prefixes stripped, tags removed.
+     */
+    public string $text = '';
+
+    /**
+     * The first paragraph, used as the lede, the card text, and the search snippet.
+     */
+    public string $summary = '';
+
+    /**
+     * Everything after the summary, the example still in place.
+     */
+    public string $rest = '';
+
+    /**
+     * The body of the first ```echo fence. Empty when there is none.
+     */
+    public string $example = '';
+
+    /**
+     * `$rest` with the example taken out, for a page that shows the example on its own.
+     */
+    public string $restWithoutExample = '';
+
+    /**
+     * Every `@param` line, in the order written.
+     */
+    public array<ParamDoc> $params = array<ParamDoc>();
+
+    /**
+     * The `@return` (or `@returns`) text. Empty when there is none.
+     */
+    public string $returns = '';
+
+    /**
+     * Read a docblock from echoc's `doc` string.
+     *
+     * Tags inside a code fence are left alone, so an example that shows a
+     * docblock keeps its `@param` lines. A tag runs to the end of its line.
+     * Continuation lines are not joined, so you should keep each one on one line.
+     *
+     * @param $raw The comment with or without its markers. Empty gives an empty `Docblock`.
+     */
+    public static function parse(const string& $raw) : Docblock
+    {
+        Docblock $d = Docblock();
+        string $body = Docblock::strip($raw);
+        array<string> $kept = array<string>();
+        bool $fence = false;
+        foreach (Lines::split($body) as $line) {
+            string $t = str::trim($line);
+            if ($t->starts('```') || $t->starts('~~~')) {
+                $fence = $fence == false;
+            }
+            if ($fence == false && $t->starts('@param ')) {
+                string $rest = str::trim($t->sub(7, $t->size() - 7));
+                usize $space = $rest->find(' ');
+                if ($space < $rest->size()) {
+                    $d->params->push(ParamDoc($rest->sub(0, $space), str::trim($rest->sub($space + 1, $rest->size() - $space - 1))));
+                } else {
+                    $d->params->push(ParamDoc($rest, ''));
+                }
+                continue;
+            }
+            if ($fence == false && ($t->starts('@return ') || $t->starts('@returns '))) {
+                usize $space = $t->find(' ');
+                $d->returns = str::trim($t->sub($space + 1, $t->size() - $space - 1));
+                continue;
+            }
+            $kept->push($line);
+        }
+        while ($kept->count() > 0 && Lines::blank($kept[$kept->count() - 1])) {
+            $kept->pop();
+        }
+        $d->text = str::join($kept, "\n");
+
+        // the summary runs to the first blank line, a fence, or a block that is not text
+        usize $i = 0;
+        while ($i < $kept->count() && Lines::blank($kept[$i])) {
+            $i = $i + 1;
+        }
+        array<string> $summary = array<string>();
+        while ($i < $kept->count()) {
+            string $t = str::trim($kept[$i]);
+            if ($t->empty() || $t->starts('```') || $t->starts('~~~') || $t->starts('#') || $t->starts('>') || $t->starts(':::')
+                || $t->starts('- ') || $t->starts('* ') || $t->starts('|')) {
+                break;
+            }
+            $summary->push($kept[$i]);
+            $i = $i + 1;
+        }
+        $d->summary = str::trim(str::join($summary, "\n"));
+        array<string> $rest = array<string>();
+        while ($i < $kept->count()) {
+            $rest->push($kept[$i]);
+            $i = $i + 1;
+        }
+        $d->rest = str::trim(str::join($rest, "\n"));
+        Docblock::takeExample($d);
+        return $d;
+    }
+
+    /**
+     * The comment markers off: `/**`, `*\/`, and on every line the indent,
+     * one `*` and one space after it.
+     */
+    public static function strip(const string& $raw) : string
+    {
+        string $t = str::trim($raw);
+        if ($t->starts('/**')) {
+            $t = $t->sub(3, $t->size() - 3);
+        }
+        if ($t->ends('*/')) {
+            $t = $t->sub(0, $t->size() - 2);
+        }
+        array<string> $out = array<string>();
+        foreach (str::split($t, "\n")->owned() as $line) {
+            string $l = str::ltrim($line);
+            if ($l->starts('*')) {
+                $l = $l->sub(1, $l->size() - 1);
+                if ($l->starts(' ')) {
+                    $l = $l->sub(1, $l->size() - 1);
+                }
+            } else {
+                // a starless docblock keeps its own indent, minus what the first line had
+                $l = $line->clone();
+            }
+            $out->push(str::rtrim($l));
+        }
+        while ($out->count() > 0 && $out[0]->empty()) {
+            $out->remove(0);
+        }
+        return str::join($out, "\n");
+    }
+
+    private static function takeExample(Docblock& $d) : void
+    {
+        array<string> $lines = Lines::split($d->rest);
+        array<string> $without = array<string>();
+        array<string> $example = array<string>();
+        bool $inside = false;
+        bool $done = false;
+        foreach ($lines as $line) {
+            string $t = str::trim($line);
+            if ($done == false && $inside == false && $t->starts('```') && Lang::named(Fence::read($t->sub(3, $t->size() - 3))->lang) == Lang::eco) {
+                $inside = true;
+                continue;
+            }
+            if ($inside) {
+                if ($t == '```') {
+                    $inside = false;
+                    $done = true;
+                    continue;
+                }
+                $example->push($line);
+                continue;
+            }
+            $without->push($line);
+        }
+        if ($done) {
+            $d->example = str::join($example, "\n");
+            $d->restWithoutExample = str::trim(str::join($without, "\n"));
+        } else {
+            $d->restWithoutExample = $d->rest->clone();
+        }
+    }
+}

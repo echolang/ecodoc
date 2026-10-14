@@ -1,0 +1,709 @@
+/*
+ * Blocks to HTML. Also keeps what a page's chrome needs from the content:
+ * the headings (outline, search) and the plain text under each one.
+ */
+
+namespace ecodoc::md;
+
+use ecodoc::hl::{Highlight, Lang};
+use ecodoc::site::Links;
+use ecodoc::text::{Ascii, Html};
+use ecodoc::text::ch;
+
+/**
+ * One heading as the outline sees it.
+ */
+public struct Heading
+{
+    /**
+     * `1` for `#`, up to `6`.
+     */
+    public int32 $level;
+
+    /**
+     * The anchor, written as `{#id}` or slugged from the text.
+     */
+    public string $id;
+
+    /**
+     * The heading's content as HTML, code spans and emphasis kept.
+     */
+    public string $html;
+
+    /**
+     * The same content as plain text, for the search index and the page title.
+     */
+    public string $text;
+
+    /**
+     * The plain text written under this heading before the next one, for the search index.
+     */
+    public string $body = '';
+}
+
+/**
+ * Heading ids, unique within one page. Lowercase, every run of punctuation
+ * and spaces one `-`, a leading digit guarded by `_`.
+ *
+ * ```echo
+ * Slugger $s = Slugger();
+ * echo $s->slug('Install');      // install
+ * echo $s->slug("What's new?");  // what-s-new
+ * echo $s->slug('2. Setup');     // _2-setup
+ * echo $s->slug('Install');      // install-1
+ * ```
+ *
+ * I keep the rules fixed on purpose: a link to `#getting-started` keeps
+ * working from one build to the next.
+ */
+public struct Slugger
+{
+    /**
+     * Every id handed out so far, with how many times its base was asked for again.
+     */
+    public map<string, int32> $seen = map<string, int32>();
+
+    /**
+     * An id for a heading reading `$text`, unique on this page. The second
+     * time the same text comes along it gets `-1`, then `-2`. Text without a
+     * single letter or digit becomes `section`.
+     */
+    public function slug(const string& $text) : string
+    {
+        string $base = Slugger::of($text);
+        if ($base->empty()) {
+            $base = 'section';
+        }
+        if ($this->seen->has($base) == false) {
+            $this->seen[$base] = 0;
+            return $base;
+        }
+        int32 $n = $this->seen->get($base) + 1;
+        $this->seen[$base] = $n;
+        string $next = "{$base}-{$n}";
+        $this->seen[$next] = 0;
+        return $next;
+    }
+
+    /**
+     * Claim an id written by hand, so a later slug does not collide with it.
+     */
+    public function claim(const string& $id) : void
+    {
+        if ($this->seen->has($id) == false) {
+            $this->seen[$id] = 0;
+        }
+    }
+
+    /**
+     * The slug of `$text` with no uniqueness, no state. `slug()` builds on this.
+     */
+    public static function of(const string& $text) : string
+    {
+        string $out = '';
+        bool $dash = false;
+        for (usize $i = 0; $i < $text->size(); $i++) {
+            uint8 $b = $text->byte($i);
+            if (Ascii::word($b) || $b >= 128) {
+                if ($dash && $out->empty() == false) {
+                    $out->push(ch::DASH);
+                }
+                $dash = false;
+                $out->push(Ascii::lowerByte($b));
+                continue;
+            }
+            $dash = true;
+        }
+        if ($out->empty() == false && Ascii::digit($out->byte(0))) {
+            return "_{$out}";
+        }
+        return $out;
+    }
+}
+
+/**
+ * A fence's info string, read: `echo title="double.eco" {1,3-5}`, or the
+ * short forms `echo [double.eco]` and `echo:line-numbers`.
+ *
+ * ```echo
+ * string $info = 'echo [a.eco] {1,3-5}';
+ * Fence $f = Fence::read($info);
+ * echo $f->lang;         // echo
+ * echo $f->title;        // a.eco
+ * echo $f->isMarked(4);  // true
+ * echo $f->isMarked(2);  // false
+ * ```
+ *
+ * Everything after the language is optional and can come in any order. An
+ * unknown word is ignored, so a fence written for another tool still renders.
+ */
+public struct Fence
+{
+    /**
+     * The first word, lowercased: `echo`, `json`, `sh`. Empty for a bare fence.
+     */
+    public string $lang = '';
+
+    /**
+     * The file name in the header, from `title="..."` or `[...]`.
+     */
+    public string $title = '';
+
+    /**
+     * Which lines are highlighted, indexed by 1-based line number.
+     * `isMarked()` reads it; the array is only as long as the last marked line.
+     */
+    public array<bool> $marked = array<bool>();
+
+    /**
+     * Show line numbers: `numbers`, `line-numbers` or `:line-numbers`.
+     */
+    public bool $numbers = false;
+
+    /**
+     * Leave `echo ...; // out` lines as comments. Set by `plain` or
+     * `no-output`, for the day you want to show a comment as a comment.
+     */
+    public bool $plain = false;
+
+    /**
+     * Read an info string, the text after the opening backticks.
+     */
+    public static function read(const string& $info) : Fence
+    {
+        Fence $f = Fence();
+        string $rest = str::trim($info);
+
+        // the language is the first word, up to a space, a brace or a colon
+        usize $i = 0;
+        while ($i < $rest->size() && Ascii::space($rest->byte($i)) == false && $rest->byte($i) != ch::LBRACE
+            && $rest->byte($i) != ch::COLON && $rest->byte($i) != ch::LBRACKET) {
+            $i = $i + 1;
+        }
+        $f->lang = str::lower($rest->sub(0, $i));
+        $rest = $rest->sub($i, $rest->size() - $i);
+
+        if ($rest->contains(':line-numbers')) {
+            $f->numbers = true;
+        }
+        usize $titleAt = $rest->find('title="');
+        if ($titleAt < $rest->size()) {
+            usize $end = $rest->find('"', $titleAt + 7);
+            if ($end < $rest->size()) {
+                $f->title = $rest->sub($titleAt + 7, $end - $titleAt - 7);
+            }
+        } else {
+            usize $open = $rest->find('[');
+            usize $close = $rest->find(']');
+            if ($open < $close && $close < $rest->size()) {
+                $f->title = $rest->sub($open + 1, $close - $open - 1);
+            }
+        }
+        usize $brace = $rest->find('{');
+        usize $braceEnd = $rest->find('}');
+        if ($brace < $braceEnd && $braceEnd < $rest->size()) {
+            Fence::marks($rest->sub($brace + 1, $braceEnd - $brace - 1), $f->marked);
+        }
+        foreach (str::split($rest, ' ')->owned() as $word) {
+            if ($word == 'plain' || $word == 'no-output') {
+                $f->plain = true;
+            }
+            if ($word == 'numbers' || $word == 'line-numbers') {
+                $f->numbers = true;
+            }
+        }
+        return $f;
+    }
+
+    private static function marks(const string& $spec, array<bool>& $marked) : void
+    {
+        foreach (str::split($spec, ',')->owned() as $part) {
+            string $p = str::trim($part);
+            usize $dash = $p->find('-');
+            int64 $from = 0;
+            int64 $to = 0;
+            if ($dash < $p->size()) {
+                $from = str::int($p->sub(0, $dash)) ?? 0;
+                $to = str::int($p->sub($dash + 1, $p->size() - $dash - 1)) ?? 0;
+            } else {
+                $from = str::int($p) ?? 0;
+                $to = $from;
+            }
+            if ($from < 1 || $to < $from || $to > 100000) {
+                continue;
+            }
+            while ($marked->count() < ($to as usize) + 1) {
+                $marked->push(false);
+            }
+            for (int64 $k = $from; $k <= $to; $k++) {
+                $marked[$k as usize] = true;
+            }
+        }
+    }
+
+    /**
+     * Whether 1-based `$line` is highlighted.
+     */
+    public const function isMarked(usize $line) : bool
+    {
+        return $line < $this->marked->count() && $this->marked[$line];
+    }
+}
+
+/**
+ * One line of an Echo example split into what it says and what it echoes:
+ * `echo $n;  // 42` is the code `echo $n;` and the output `42`.
+ */
+public struct ExampleLine
+{
+    /**
+     * The code part, the whole line when it does not echo.
+     */
+    public string $code;
+
+    /**
+     * What the trailing comment says, empty when it does not echo.
+     */
+    public string $output;
+
+    /**
+     * Whether the line has an output to show.
+     */
+    public bool $echoes;
+
+    /**
+     * Split `$line` into code and output.
+     *
+     * ```echo
+     * ExampleLine $e = ExampleLine::split(
+     *     'echo $n * 2;  // 84');
+     * echo $e->code;    // echo $n * 2;
+     * echo $e->output;  // 84
+     * echo $e->echoes;  // true
+     * ```
+     *
+     * Only lines that start with `echo ` or `dprint(` and end their statement
+     * with `;` before the comment count. Any other comment stays a comment,
+     * so you can annotate an example without it turning into output. A `//`
+     * inside a string literal is not a comment either: URLs are safe.
+     */
+    public static function split(const string& $line) : ExampleLine
+    {
+        string $t = str::ltrim($line);
+        if ($t->starts('echo ') == false && $t->starts('dprint(') == false) {
+            return ExampleLine($line->clone(), '', false);
+        }
+        usize $at = ExampleLine::trailingComment($line);
+        if ($at >= $line->size()) {
+            return ExampleLine($line->clone(), '', false);
+        }
+        string $code = str::rtrim($line->sub(0, $at));
+        string $out = str::trim($line->sub($at + 2, $line->size() - $at - 2));
+        if ($code->ends(';') == false) {
+            return ExampleLine($line->clone(), '', false);
+        }
+        return ExampleLine($code, $out, true);
+    }
+
+    /**
+     * The `//` that starts a trailing comment, outside any string. The size
+     * of `$line` when there is none.
+     */
+    private static function trailingComment(const string& $line) : usize
+    {
+        uint8 $quote = 0;
+        usize $i = 0;
+        while ($i + 1 < $line->size()) {
+            uint8 $b = $line->byte($i);
+            if ($quote != 0) {
+                if ($b == ch::BACKSLASH) {
+                    $i = $i + 2;
+                    continue;
+                }
+                if ($b == $quote) {
+                    $quote = 0;
+                }
+            } else if ($b == ch::QUOTE || $b == ch::APOS) {
+                $quote = $b;
+            } else if ($b == ch::SLASH && $line->byte($i + 1) == ch::SLASH) {
+                return $i;
+            }
+            $i = $i + 1;
+        }
+        return $line->size();
+    }
+}
+
+/**
+ * A code window: a header with the file name and a copy button, then the
+ * lines. An Echo example whose `echo` lines end in `// output` gets the
+ * output column instead of the comments.
+ */
+public struct CodeBlock
+{
+    /**
+     * Append the HTML of one fenced code block to `$out`.
+     *
+     * An `echo` or `eco` fence with at least one echoing line becomes rows
+     * with an output column. Everything else is a highlighted `<pre>`. With
+     * a `.eco` title, the header also shows the `echoc run` command for it.
+     *
+     * @param $info The fence's info string, as `Fence::read` takes it.
+     * @param $code The block's content, without the fence lines. Trailing newlines are dropped.
+     * @param $out Appended to. The block is added, nothing is replaced.
+     */
+    public static function render(const string& $info, const string& $code, string& $out) : void
+    {
+        Fence $fence = Fence::read($info);
+        Lang $lang = Lang::named($fence->lang);
+        string $body = $code->clone();
+        while ($body->ends("\n")) {
+            $body = $body->sub(0, $body->size() - 1);
+        }
+
+        array<string> $raw = str::split($body, "\n")->owned();
+        bool $examples = false;
+        if ($fence->plain == false && $lang == Lang::eco) {
+            foreach ($raw as $l) {
+                if (ExampleLine::split($l)->echoes) {
+                    $examples = true;
+                    break;
+                }
+            }
+        }
+
+        string $title = Html::escape($fence->title);
+        string $langName = Html::escape($fence->lang);
+        $out->append("<div class=\"code surface\" data-lang=\"{$langName}\">");
+        if ($fence->title->empty() == false || $examples) {
+            $out->append('<div class="code-head"><span class="code-file"><span class="dot"></span>');
+            if ($fence->title->empty() == false) {
+                $out->append($title);
+            } else {
+                $out->append($langName);
+            }
+            $out->append('</span><span class="code-tools">');
+            if ($examples && $fence->title->ends('.eco')) {
+                $out->append("<span class=\"code-cmd\">echoc run {$title}</span>");
+            }
+            $out->append('<button type="button" class="copy">Copy</button></span></div>');
+        } else {
+            $out->append('<button type="button" class="copy floating" aria-label="Copy code">Copy</button>');
+        }
+
+        if ($examples) {
+            CodeBlock::rows($raw, $fence, $out);
+        } else {
+            CodeBlock::pre($lang, $body, $fence, $out);
+        }
+        $out->append("</div>\n");
+    }
+
+    private static function rows(const array<string>& $raw, const Fence& $fence, string& $out) : void
+    {
+        array<string> $code = array<string>();
+        array<string> $outputs = array<string>();
+        foreach ($raw as $l) {
+            ExampleLine $e = ExampleLine::split($l);
+            $code->push($e->code);
+            $outputs->push($e->output);
+        }
+        array<string> $lines = Highlight::lines(.eco, str::join($code, "\n"));
+        $out->append('<div class="code-body rows">');
+        for (usize $k = 0; $k < $lines->count(); $k++) {
+            string $cls = 'row';
+            if ($fence->isMarked($k + 1)) {
+                $cls = 'row hl';
+            }
+            usize $num = $k + 1;
+            $out->append("<div class=\"{$cls}\"><span class=\"ln\">{$num}</span><code>");
+            if ($lines[$k]->empty()) {
+                $out->append(' ');
+            } else {
+                $out->append($lines[$k]);
+            }
+            $out->append('</code><output>');
+            if ($k < $outputs->count() && $outputs[$k]->empty() == false) {
+                $out->append('<span class="out-mark">›</span>');
+                Html::escapeInto($outputs[$k], $out);
+            }
+            $out->append('</output></div>');
+        }
+        $out->append('</div>');
+    }
+
+    private static function pre(Lang $lang, const string& $body, const Fence& $fence, string& $out) : void
+    {
+        array<string> $lines = Highlight::lines($lang, $body);
+        string $cls = 'code-body';
+        if ($fence->numbers) {
+            $cls = 'code-body numbered';
+        }
+        $out->append("<pre class=\"{$cls}\"><code>");
+        for (usize $k = 0; $k < $lines->count(); $k++) {
+            if ($k > 0) {
+                $out->append("\n");
+            }
+            if ($fence->isMarked($k + 1)) {
+                $out->append('<span class="line hl">');
+            } else {
+                $out->append('<span class="line">');
+            }
+            $out->append($lines[$k]);
+            $out->append('</span>');
+        }
+        $out->append('</code></pre>');
+    }
+}
+
+/**
+ * Renders one document to HTML. Keeps the headings it wrote, in order, for
+ * the outline and the search index.
+ */
+public class Renderer
+{
+    /**
+     * Resolves every link in the document.
+     */
+    public Links $links;
+
+    /**
+     * The page's heading ids. Shared across one document so ids stay unique.
+     */
+    public Slugger $slugs = Slugger();
+
+    /**
+     * Every heading written so far, in order.
+     */
+    public array<Heading> $headings = array<Heading>();
+
+    /**
+     * The first `#` heading's text, when the page has one.
+     */
+    public string $title = '';
+
+    /**
+     * A renderer that resolves links through `$links`. A new one per
+     * document: heading ids and `$title` are per page.
+     */
+    constructor(Links $links)
+    {
+        $this->links = $links;
+    }
+
+    /**
+     * The HTML of `$doc`. Afterwards `$headings` and `$title` describe it.
+     */
+    public function document(const Document& $doc) : string
+    {
+        string $out = '';
+        Inline $inline = Inline($doc, $this->links);
+        $this->blocks($doc->blocks, false, $inline, $out);
+        return $out;
+    }
+
+    /**
+     * Text for the search index: what follows the current heading.
+     */
+    private function note(const string& $html) : void
+    {
+        if ($this->headings->empty()) {
+            return;
+        }
+        Heading& $last = $this->headings->at($this->headings->count() - 1);
+        if ($last->body->size() > 600) {
+            return;
+        }
+        string $text = Html::text($html);
+        if ($text->empty()) {
+            return;
+        }
+        if ($last->body->empty() == false) {
+            $last->body->append(' ');
+        }
+        $last->body->append($text);
+    }
+
+    private function blocks(const array<Block>& $blocks, bool $tight, Inline& $inline, string& $out) : void
+    {
+        foreach ($blocks as $b) {
+            $this->block($b, $tight, $inline, $out);
+        }
+    }
+
+    private function block(Block $b, bool $tight, Inline& $inline, string& $out) : void
+    {
+        $this->links->line = $b->line;
+        match ($b->kind) {
+            .paragraph => {
+                $this->paragraph($b, $tight, $inline, $out);
+            },
+            .heading => {
+                $this->heading($b, $inline, $out);
+            },
+            .code => {
+                CodeBlock::render($b->info, $b->text, $out);
+                $this->note($b->text);
+            },
+            .quote => {
+                $out->append("<blockquote>\n");
+                $this->blocks($b->children, false, $inline, $out);
+                $out->append("</blockquote>\n");
+            },
+            .alert => {
+                $this->callout($b, $inline, $out);
+            },
+            .list => {
+                $this->list($b, $inline, $out);
+            },
+            .item => {
+                $this->blocks($b->children, $tight, $inline, $out);
+            },
+            .table => {
+                $this->table($b, $inline, $out);
+            },
+            .html => {
+                $out->append($b->text);
+                $out->append("\n");
+            },
+            .rule => {
+                $out->append("<hr>\n");
+            },
+            .container => {
+                $this->callout($b, $inline, $out);
+            },
+        };
+    }
+
+    private function paragraph(Block $b, bool $tight, Inline& $inline, string& $out) : void
+    {
+        string $html = $inline->render($b->text);
+        $this->note($html);
+        if ($tight) {
+            $out->append($html);
+            return;
+        }
+        $out->append('<p>');
+        $out->append($html);
+        $out->append("</p>\n");
+    }
+
+    private function heading(Block $b, Inline& $inline, string& $out) : void
+    {
+        string $html = $inline->render($b->text);
+        string $text = Html::text($html);
+        if ($b->level == 1 && $this->title->empty()) {
+            $this->title = $text;
+        }
+        string $id = $b->id->clone();
+        if ($id->empty()) {
+            $id = $this->slugs->slug($text);
+        } else {
+            $this->slugs->claim($id);
+        }
+        $this->headings->push(Heading($b->level, $id, $html, $text));
+        string $safe = Html::escape($id);
+        string $label = Html::escape($text);
+        $out->append("<h{$b->level} id=\"{$safe}\" tabindex=\"-1\">{$html}<a class=\"anchor\" href=\"#{$safe}\" aria-label=\"Permalink to {$label}\">#</a></h{$b->level}>\n");
+    }
+
+    private function callout(Block $b, Inline& $inline, string& $out) : void
+    {
+        string $kind = Html::escape($b->info);
+        string $title = $b->title->clone();
+        if ($title->empty()) {
+            $title = Alerts::title($b->info);
+        }
+        string $titleHtml = $inline->render($title);
+        if ($b->info == 'details') {
+            $out->append("<details class=\"callout details\"><summary>{$titleHtml}</summary>\n");
+            $this->blocks($b->children, false, $inline, $out);
+            $out->append("</details>\n");
+            return;
+        }
+        $out->append("<div class=\"callout {$kind}\">");
+        if ($b->info == 'compile' || $b->info == 'danger' || $b->info == 'caution') {
+            $out->append('<svg class="callout-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.5v.01"></path></svg>');
+        }
+        $out->append('<div class="callout-body">');
+        if ($titleHtml->empty() == false) {
+            $out->append("<p class=\"callout-title\">{$titleHtml}</p>\n");
+        }
+        $this->blocks($b->children, false, $inline, $out);
+        $out->append("</div></div>\n");
+    }
+
+    private function list(Block $b, Inline& $inline, string& $out) : void
+    {
+        if ($b->ordered) {
+            if ($b->start != 1) {
+                $out->append("<ol start=\"{$b->start}\">\n");
+            } else {
+                $out->append("<ol>\n");
+            }
+        } else {
+            $out->append("<ul>\n");
+        }
+        foreach ($b->children as $item) {
+            $out->append('<li>');
+            string $inner = '';
+            $this->blocks($item->children, $b->tight, $inline, $inner);
+            // a task list item, `- [ ] todo`
+            if ($inner->starts('[ ] ') || $inner->starts('[x] ') || $inner->starts('[X] ')) {
+                bool $done = $inner->starts('[ ] ') == false;
+                string $rest = $inner->sub(4, $inner->size() - 4);
+                if ($done) {
+                    $inner = "<input type=\"checkbox\" checked disabled> {$rest}";
+                } else {
+                    $inner = "<input type=\"checkbox\" disabled> {$rest}";
+                }
+            }
+            $out->append($inner);
+            $out->append("</li>\n");
+        }
+        if ($b->ordered) {
+            $out->append("</ol>\n");
+        } else {
+            $out->append("</ul>\n");
+        }
+    }
+
+    private function table(Block $b, Inline& $inline, string& $out) : void
+    {
+        $out->append("<div class=\"table-wrap\"><table>\n");
+        for (usize $r = 0; $r < $b->rows->count(); $r++) {
+            if ($r == 0) {
+                $out->append('<thead>');
+            } else if ($r == 1) {
+                $out->append('<tbody>');
+            }
+            $out->append('<tr>');
+            for (usize $c = 0; $c < $b->rows[$r]->count(); $c++) {
+                string $tag = 'td';
+                if ($r == 0) {
+                    $tag = 'th';
+                }
+                string $align = '';
+                if ($c < $b->align->count() && $b->align[$c]->empty() == false) {
+                    $align = " style=\"text-align: {$b->align[$c]}\"";
+                }
+                string $cell = $inline->render($b->rows[$r][$c]);
+                $out->append("<{$tag}{$align}>{$cell}</{$tag}>");
+            }
+            $out->append("</tr>\n");
+            if ($r == 0) {
+                $out->append("</thead>\n");
+            }
+        }
+        if ($b->rows->count() > 1) {
+            $out->append("</tbody>\n");
+        }
+        $out->append("</table></div>\n");
+        string $text = '';
+        foreach ($b->rows as $row) {
+            $text->append(str::join($row, ' '));
+            $text->append(' ');
+        }
+        $this->note(Html::escape($text));
+    }
+}

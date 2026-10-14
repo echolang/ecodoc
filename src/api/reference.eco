@@ -1,0 +1,836 @@
+/*
+ * The API reference: `echoc -p decls` turned into types, namespaces, and pages.
+ */
+
+namespace ecodoc::api;
+
+use std::io;
+use ecodoc::config::{ApiConfig, Field, Sidebar, SidebarItem, Site};
+use ecodoc::md::{Document, Inline, Slugger};
+use ecodoc::site::{Links, PageView, SearchIndex};
+use ecodoc::sys::{Path, Run, Sys, Walk};
+use ecodoc::text::{Ascii, Html};
+
+/**
+ * The API reference, read from the library itself. `echoc -p decls` prints
+ * every resolved declaration with its docblock and its tool attributes; this
+ * turns that into types, namespaces and members with URLs, registers every
+ * symbol so pages can link to it, and renders the reference pages.
+ *
+ * ```echo
+ * Reference $ref = Reference::read(
+ *     'echoc', 'docs', $site
+ * )->or(Reference());
+ * $ref->register($site, $links);
+ * echo $ref->library;        // ecodoc
+ * echo $ref->symbolCount();  // 504
+ * array<PageView> $pages =
+ *     $ref->views($site, $links, $search);
+ * ```
+ *
+ * Three steps, and the order is the point. `read()` builds the model,
+ * `register()` puts every symbol into `Links`, and only then do `views()` and
+ * the guide pages render. A docblock can link a type declared three files
+ * later. I never parse Echo here: if echoc understood a declaration one way,
+ * the reference shows it that way.
+ */
+public class Reference
+{
+    /**
+     * The library's `#[module:]` name.
+     */
+    public string $library = '';
+
+    /**
+     * The library's `#[version:]`. Empty when it has none.
+     */
+    public string $version = '';
+
+    /**
+     * The directory of the library's manifest. `docs::example` paths are
+     * relative to it, as the decls' file paths are.
+     */
+    public string $root = '';
+
+    /**
+     * Every documented type, sorted by qualified name.
+     */
+    public array<ApiType> $types = array<ApiType>();
+
+    /**
+     * Every namespace that declares something, including empty prefixes.
+     */
+    public array<ApiNamespace> $namespaces = array<ApiNamespace>();
+
+    /**
+     * Qualified name to its summary as plain text, for cards and tooltips. Filled by `register()`.
+     */
+    public map<string, string> $summaries = map<string, string>();
+
+    /**
+     * Every page URL handed out, lowercased, so `Value` and `value` do not
+     * share one directory on a case-insensitive file system.
+     */
+    public map<string, string> $used = map<string, string>();
+
+    private map<string, ApiType> $byName = map<string, ApiType>();
+
+    private map<string, ApiNamespace> $spaces = map<string, ApiNamespace>();
+
+    /**
+     * The `#[docs::api:]` settings this reference was read with.
+     */
+    public ApiConfig $config = ApiConfig();
+
+    /**
+     * Run echoc over the library named in `#[docs::api:]` and read what it printed.
+     *
+     * @param $echoc The compiler to run, usually `$ECHOC` or `echoc` on `PATH`.
+     * @param $docs The docs folder. The library manifest is relative to this.
+     * @param $site Already loaded. `api` on it is what this reads.
+     */
+    public static function read(const string& $echoc, const string& $docs, const Site& $site) : result<Reference, Failure>
+    {
+        Reference $ref = Reference();
+        $ref->config = $site->api;
+        string $manifest = Path::normalize(Path::join($docs, $site->api->manifest));
+        if (Sys::isFile($manifest) == false) {
+            return .error(.manifest("#[docs::api:] names {$manifest}, which does not exist"));
+        }
+        $ref->root = Path::dir($manifest);
+
+        array<string> $info = [$echoc, 'run', '-p', 'manifest', '-m', $manifest];
+        Run $about = Sys::run($info);
+        if ($about->ok()) {
+            json::Value $m = json::parse($about->out)->or(json::object());
+            $ref->library = Field::text($m, 'name');
+            $ref->version = Field::text($m, 'version');
+        }
+
+        json::Value $decls = guard Reference::decls($echoc, $docs, $manifest, $site->api->all) else ($e) {
+            return .error($e);
+        };
+        $ref->collect($decls);
+        $ref->assign();
+        return .ok($ref);
+    }
+
+    /**
+     * The decls JSON, from the cache when no source has changed since it was printed.
+     */
+    private static function decls(const string& $echoc, const string& $docs, const string& $manifest, bool $all) : result<json::Value, Failure>
+    {
+        string $cache = Path::join($docs, '.ecodoc');
+        string $stamp = Reference::stamp(Path::dir($manifest), $manifest, $all);
+        string $cached = Path::join($cache, 'decls.json');
+        string $stampFile = Path::join($cache, 'decls.stamp');
+        if (Sys::isFile($cached) && Sys::isFile($stampFile)) {
+            string $old = io::readfile($stampFile)->or('');
+            if ($old == $stamp) {
+                string $text = io::readfile($cached)->or('');
+                json::Value $hit = guard json::parse($text) else {
+                    return Reference::fresh($echoc, $cache, $manifest, $all, $stamp);
+                };
+                return .ok($hit);
+            }
+        }
+        return Reference::fresh($echoc, $cache, $manifest, $all, $stamp);
+    }
+
+    private static function fresh(const string& $echoc, const string& $cache, const string& $manifest, bool $all, const string& $stamp) : result<json::Value, Failure>
+    {
+        // the library's own build directory: echoc refuses a --build-dir for the root module
+        // sharing the cache makes the first reference build no slower than an `echoc build`
+        Sys::mkdirs($cache);
+        array<string> $argv = [
+            $echoc, 'build', '-m', $manifest, '-p', 'decls',
+            '-o', Path::join($cache, 'decls-bin')
+        ];
+        if ($all) {
+            $argv->push('--decls-all');
+        }
+        Run $run = Sys::run($argv);
+        // decls print even when a body fails to compile a mid-edit reference is still worth having
+        json::Value $decls = guard json::parse($run->out) else ($e) {
+            if ($run->ok() == false) {
+                return .error(.tool('echoc -p decls', $run->code));
+            }
+            return .error(.input("echoc -p decls printed something that is not JSON: {$e}"));
+        };
+        if ($run->ok() == false) {
+            io::eprintln("ecodoc: echoc exited {$run->code}; the reference uses the declarations it printed");
+        }
+        Sys::put(Path::join($cache, 'decls.json'), $run->out);
+        Sys::put(Path::join($cache, 'decls.stamp'), $stamp);
+        return .ok($decls);
+    }
+
+    /**
+     * A fingerprint of every `.eco` file of the library. Includes whether `--decls-all` was set.
+     */
+    private static function stamp(const string& $root, const string& $manifest, bool $all) : string
+    {
+        array<string> $skip = Walk::ignored();
+        $skip->push('docs');
+        int64 $sum = Sys::mtime($manifest) + Walk::stamp($root, '.eco', $skip);
+        return "{$sum}:{$all}";
+    }
+
+    // ------------------------------------------------------------------------ reading
+
+    private const function visible(const json::Value& $d) : bool
+    {
+        string $v = Field::text($d, 'visibility');
+        if (Field::flag(Field::tools($d, 'docs'), 'hidden', false)) {
+            return false;
+        }
+        if ($v == 'public') {
+            return true;
+        }
+        if ($v == 'internal') {
+            return $this->config->visibility == 'internal' || $this->config->visibility == 'private';
+        }
+        return $this->config->visibility == 'private';
+    }
+
+    private const function includes(const string& $module) : bool
+    {
+        if ($this->config->modules->empty()) {
+            return true;
+        }
+        foreach ($this->config->modules as $m) {
+            if ($m == $module) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private function collect(const json::Value& $decls) : void
+    {
+        array<json::Value> $free = array<json::Value>();
+        foreach (Field::items($decls, 'modules') as $module) {
+            string $mname = Field::text($module, 'name');
+            if ($this->includes($mname) == false) {
+                continue;
+            }
+            foreach (Field::items($module, 'declarations') as $d) {
+                if ($this->visible($d) == false) {
+                    continue;
+                }
+                string $kind = Field::text($d, 'kind');
+                if ($kind == 'struct' || $kind == 'class' || $kind == 'enum' || $kind == 'interface' || $kind == 'opaque') {
+                    $this->types->push($this->type($d));
+                } else {
+                    $free->push($d);
+                }
+            }
+        }
+        $this->types->sort(by: function(const ApiType& $a, const ApiType& $b) : ordering {
+            return $a->qualified <=> $b->qualified;
+        });
+
+        foreach ($this->types as $t) {
+            $this->byName[$t->qualified] = $t;
+            $this->space($t->ns)->types->push($t);
+        }
+        foreach ($free as $d) {
+            $this->loose($d);
+        }
+        $this->namespaces->sort(by: function(const ApiNamespace& $a, const ApiNamespace& $b) : ordering {
+            return $a->name <=> $b->name;
+        });
+        foreach ($this->namespaces as $ns) {
+            string $up = Links::parent($ns->name);
+            if ($up->empty() == false) {
+                $this->space($up)->children->push($ns);
+            }
+        }
+    }
+
+    /**
+     * The namespace called `$name`, created on first use together with every
+     * namespace above it. So `a::b::c` brings `a` and `a::b`, and the tree has no gaps.
+     */
+    private function space(const string& $name) : ApiNamespace
+    {
+        if ($this->spaces->has($name)) {
+            return $this->spaces->get($name);
+        }
+        string $up = Links::parent($name);
+        if ($up->empty() == false) {
+            $this->space($up);
+        }
+        ApiNamespace $ns = ApiNamespace();
+        $ns->name = $name->clone();
+        $this->namespaces->push($ns);
+        $this->spaces[$name] = $ns;
+        return $ns;
+    }
+
+    private const function typeNamed(const string& $qualified) : ApiType?
+    {
+        if ($this->byName->has($qualified)) {
+            return $this->byName->get($qualified);
+        }
+        return null;
+    }
+
+    private function type(const json::Value& $d) : ApiType
+    {
+        ApiType $t = ApiType();
+        $t->decl = $d;
+        $t->qualified = Field::text($d, 'qualified');
+        $t->name = Field::text($d, 'name');
+        $t->ns = Links::parent($t->qualified);
+        $t->kind = Field::text($d, 'kind');
+        $t->doc = Docblock::parse(Field::text($d, 'doc'));
+        $t->tools = Field::tools($d, 'docs');
+
+        foreach (Field::items($d, 'cases') as $c) {
+            ApiMember $m = ApiMember();
+            $m->kind = 'case';
+            $m->name = Field::text($c, 'name');
+            $m->owner = $t->qualified;
+            $m->decls->push($c);
+            $m->doc = Docblock::parse(Field::text($c, 'doc'));
+            $m->payload = Field::items($c, 'payload')->empty() == false;
+            $t->members->push($m);
+        }
+        foreach (Field::items($d, 'constructors') as $c) {
+            if ($this->visible($c) == false) {
+                continue;
+            }
+            Reference::overload($t->members, 'constructor', $t->name, $t->qualified, $c);
+        }
+        foreach (Field::items($d, 'methods') as $f) {
+            if ($this->visible($f) == false) {
+                continue;
+            }
+            string $kind = Field::text($f, 'kind');
+            if ($kind == 'method' && Field::flag($f, 'const', false)) {
+                $kind = 'const';
+            }
+            Reference::overload($t->members, $kind, Field::text($f, 'name'), $t->qualified, $f);
+        }
+        foreach (Field::items($d, 'members') as $f) {
+            string $kind = 'method';
+            if (Field::flag($f, 'const', false)) {
+                $kind = 'const';
+            }
+            Reference::overload($t->members, $kind, Field::text($f, 'name'), $t->qualified, $f);
+        }
+        foreach (Field::items($d, 'requirements') as $f) {
+            Reference::overload($t->members, 'method', Field::text($f, 'name'), $t->qualified, $f);
+        }
+        foreach (Field::items($d, 'fields') as $f) {
+            if ($this->visible($f) == false) {
+                continue;
+            }
+            ApiMember $m = ApiMember();
+            $m->kind = 'field';
+            $m->name = Field::text($f, 'name');
+            $m->owner = $t->qualified;
+            $m->decls->push($f);
+            $m->doc = Docblock::parse(Field::text($f, 'doc'));
+            $m->tools = Field::tools($f, 'docs');
+            $t->members->push($m);
+        }
+        foreach (Field::items($d, 'constants') as $c) {
+            if ($this->visible($c) == false) {
+                continue;
+            }
+            ApiMember $m = ApiMember();
+            $m->kind = 'constant';
+            $m->name = Field::text($c, 'name');
+            $m->owner = $t->qualified;
+            $m->decls->push($c);
+            $m->doc = Docblock::parse(Field::text($c, 'doc'));
+            $t->members->push($m);
+        }
+        return $t;
+    }
+
+    /**
+     * Add `$decl` to the member of that kind and name, or start one.
+     */
+    private static function overload(array<ApiMember>& $into, const string& $kind, const string& $name, const string& $owner, const json::Value& $decl) : void
+    {
+        foreach ($into as $m) {
+            if ($m->kind == $kind && $m->name == $name) {
+                $m->decls->push($decl);
+                if ($m->doc->text->empty()) {
+                    $m->doc = Docblock::parse(Field::text($decl, 'doc'));
+                }
+                return;
+            }
+        }
+        ApiMember $m = ApiMember();
+        $m->kind = $kind->clone();
+        $m->name = $name->clone();
+        $m->owner = $owner->clone();
+        $m->decls->push($decl);
+        $m->doc = Docblock::parse(Field::text($decl, 'doc'));
+        $m->tools = Field::tools($decl, 'docs');
+        $into->push($m);
+    }
+
+    /**
+     * A free function, operator, or constant: into its namespace, and an
+     * operator onto the type it operates on when that type is documented.
+     */
+    private function loose(const json::Value& $d) : void
+    {
+        string $kind = Field::text($d, 'kind');
+        string $qualified = Field::text($d, 'qualified');
+        array<json::Value> $params = Field::items($d, 'params');
+
+        if ($kind == 'operator') {
+            string $subject = '';
+            if ($params->empty() == false) {
+                $subject = Spell::subject(Field::get($params[0], 'type'));
+            }
+            ApiType? $owner = $this->typeNamed($subject);
+            if ($owner != null) {
+                ApiType $t = $owner ?? ApiType();
+                Reference::overload($t->members, 'operator', Field::text($d, 'name'), $t->qualified, $d);
+                return;
+            }
+            Reference::overload($this->space(Links::parent($qualified))->operators, 'operator', Field::text($d, 'name'), Links::parent($qualified), $d);
+            return;
+        }
+
+        string $ns = Links::parent($qualified);
+        if ($kind == 'const') {
+            ApiMember $m = ApiMember();
+            $m->kind = 'constant';
+            $m->name = Field::text($d, 'name');
+            $m->owner = $ns;
+            $m->decls->push($d);
+            $m->doc = Docblock::parse(Field::text($d, 'doc'));
+            $this->space($ns)->constants->push($m);
+            return;
+        }
+
+        ApiNamespace $space = $this->space($ns);
+        Reference::overload($space->functions, 'function', Field::text($d, 'name'), $ns, $d);
+
+        // a function in another namespace taking a documented type first is shown on that type too
+        // `str::from(const Value&)` is the usual case
+        if ($params->empty() == false) {
+            string $subject = Spell::subject(Field::get($params[0], 'type'));
+            ApiType $t = guard $this->typeNamed($subject) else {
+                return;
+            };
+            if ($t->ns == $ns) {
+                return;
+            }
+            string $name = Field::text($d, 'name');
+            foreach ($space->functions as $f) {
+                if ($f->name == $name && Reference::extends($t, $f) == false) {
+                    $t->extensions->push($f);
+                }
+            }
+        }
+    }
+
+    private static function extends(ApiType $t, ApiMember $f) : bool
+    {
+        foreach ($t->extensions as $e) {
+            if ($e->name == $f->name && $e->owner == $f->owner) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // ------------------------------------------------------------------------ urls and sections
+
+    /**
+     * Give every type, namespace, and member its URL and anchor, and every member its section.
+     */
+    private function assign() : void
+    {
+        string $base = $this->config->base;
+        foreach ($this->types as $t) {
+            string $path = Reference::segments($t->qualified);
+            $t->url = $this->claim("{$base}{$path}/");
+        }
+        foreach ($this->namespaces as $ns) {
+            if ($ns->name->empty()) {
+                $ns->url = $this->claim("{$base}global/");
+            } else {
+                string $path = Reference::segments($ns->name);
+                $ns->url = $this->claim("{$base}{$path}/");
+            }
+        }
+        foreach ($this->types as $t) {
+            map<string, int32> $anchors = map<string, int32>();
+            foreach ($t->members as $m) {
+                $m->anchor = Reference::anchor($m, $anchors);
+                $m->url = "{$t->url}#{$m->anchor}";
+                $m->section = Reference::sectionOf($t, $m);
+            }
+        }
+        foreach ($this->namespaces as $ns) {
+            map<string, int32> $anchors = map<string, int32>();
+            foreach ($ns->functions as $m) {
+                $m->anchor = Reference::anchor($m, $anchors);
+                $m->url = "{$ns->url}#{$m->anchor}";
+                $m->section = Reference::sectionTool($m, 'Functions');
+            }
+            foreach ($ns->operators as $m) {
+                $m->anchor = Reference::anchor($m, $anchors);
+                $m->url = "{$ns->url}#{$m->anchor}";
+                $m->section = 'Operators';
+            }
+            foreach ($ns->constants as $m) {
+                $m->anchor = Reference::anchor($m, $anchors);
+                $m->url = "{$ns->url}#{$m->anchor}";
+                $m->section = 'Constants';
+            }
+        }
+    }
+
+    /**
+     * `json/Value` for `json::Value`.
+     */
+    private static function segments(const string& $qualified) : string
+    {
+        return str::join(str::split($qualified, '::')->owned(), '/');
+    }
+
+    /**
+     * `$url`, or a variant of it when another page already holds it. Compared
+     * without case, since a case-insensitive file system would merge them.
+     */
+    private function claim(const string& $url) : string
+    {
+        string $key = str::lower($url);
+        if ($this->used->has($key) == false) {
+            $this->used[$key] = $url;
+            return $url->clone();
+        }
+        string $stem = $url->sub(0, $url->size() - 1);
+        int32 $n = 2;
+        while (true) {
+            string $next = "{$stem}-{$n}/";
+            string $nkey = str::lower($next);
+            if ($this->used->has($nkey) == false) {
+                $this->used[$nkey] = $next;
+                return $next;
+            }
+            $n = $n + 1;
+        }
+        return $url->clone();
+    }
+
+    private static function anchor(ApiMember $m, map<string, int32>& $taken) : string
+    {
+        string $base = Slugger::of($m->name);
+        if ($m->kind == 'operator') {
+            string $slug = Reference::operatorSlug($m->name);
+            $base = "op-{$slug}";
+        } else if ($m->kind == 'constructor') {
+            $base = 'constructor';
+        }
+        if ($base->empty()) {
+            $base = 'member';
+        }
+        if ($taken->has($base) == false) {
+            $taken[$base] = 1;
+            return $base;
+        }
+        int32 $n = $taken->get($base) + 1;
+        $taken[$base] = $n;
+        return "{$base}-{$n}";
+    }
+
+    private static function operatorSlug(const string& $name) : string
+    {
+        string $sym = Spell::operatorSymbol($name);
+        if ($sym == '[]') {
+            return 'index';
+        }
+        if ($sym == '[]=') {
+            return 'index-set';
+        }
+        string $out = '';
+        for (usize $i = 0; $i < $sym->size(); $i++) {
+            uint8 $b = $sym->byte($i);
+            if (Ascii::word($b)) {
+                $out->push($b);
+            } else {
+                string $hex = "{$b:x}";
+                $out->append($hex);
+            }
+        }
+        return $out;
+    }
+
+    private static function sectionTool(ApiMember $m, const string& $fallback) : string
+    {
+        string $group = Field::text($m->tools, 'group');
+        if ($group->empty() == false) {
+            return $group;
+        }
+        return $fallback->clone();
+    }
+
+    private static function sectionOf(ApiType $t, ApiMember $m) : string
+    {
+        if ($m->kind == 'case') {
+            if ($m->payload) {
+                return Reference::sectionTool($m, 'Constructors');
+            }
+            return Reference::sectionTool($m, 'Cases');
+        }
+        if ($m->kind == 'constructor') {
+            return Reference::sectionTool($m, 'Constructors');
+        }
+        if ($m->kind == 'static') {
+            // a static that hands back its own type is one more way to build one
+            if (Field::text(Field::get($m->decls[0], 'return'), 'name') == $t->qualified) {
+                return Reference::sectionTool($m, 'Constructors');
+            }
+            return Reference::sectionTool($m, 'Static functions');
+        }
+        if ($m->kind == 'const') {
+            return Reference::sectionTool($m, 'Queries');
+        }
+        if ($m->kind == 'method') {
+            return Reference::sectionTool($m, 'Methods');
+        }
+        if ($m->kind == 'operator') {
+            return Reference::sectionTool($m, 'Operators');
+        }
+        if ($m->kind == 'field') {
+            return Reference::sectionTool($m, 'Properties');
+        }
+        return Reference::sectionTool($m, 'Constants');
+    }
+
+    /**
+     * A type's sections in reading order: `#[docs::groups: [...]]` first, then
+     * the defaults, then any other group a member names.
+     */
+    public static function sections(ApiType $t) : array<string>
+    {
+        array<string> $order = Field::strings($t->tools, 'groups');
+        array<string> $defaults = ['Cases', 'Constructors', 'Queries', 'Methods', 'Static functions', 'Operators', 'Properties', 'Constants'];
+        $order->extend($defaults);
+        foreach ($t->members as $m) {
+            $order->push($m->section);
+        }
+        array<string> $out = array<string>();
+        foreach ($order as $name) {
+            bool $seen = false;
+            foreach ($out as $o) {
+                if ($o == $name) {
+                    $seen = true;
+                }
+            }
+            if ($seen) {
+                continue;
+            }
+            foreach ($t->members as $m) {
+                if ($m->section == $name) {
+                    $out->push($name);
+                    break;
+                }
+            }
+        }
+        return $out;
+    }
+
+    // ------------------------------------------------------------------------
+    // links, search, sidebar
+
+    /**
+     * The plain-text summary of a symbol. Empty when it has none.
+     */
+    public const function summary(const string& $qualified) : string
+    {
+        if ($this->summaries->has($qualified)) {
+            return $this->summaries->get($qualified);
+        }
+        return '';
+    }
+
+    /**
+     * Types, members, functions, operators, and constants, counted once each.
+     * The number `ecodoc build` reports.
+     */
+    public const function symbolCount() : usize
+    {
+        usize $n = $this->types->count();
+        foreach ($this->types as $t) {
+            $n = $n + $t->members->count();
+        }
+        foreach ($this->namespaces as $ns) {
+            $n = $n + $ns->functions->count() + $ns->constants->count() + $ns->operators->count();
+        }
+        return $n;
+    }
+
+    /**
+     * Every symbol into `$links`, so `api:` links and type names resolve.
+     *
+     * @param $site Unused. The symbols go into `$links`.
+     * @param $links One object for the whole build. Call this before any page renders.
+     */
+    public function register(const Site& $site, Links $links) : void
+    {
+        foreach ($this->namespaces as $ns) {
+            if ($ns->name->empty() == false) {
+                $links->symbol($ns->name, $ns->url, $ns->title());
+            }
+        }
+        foreach ($this->types as $t) {
+            $links->symbol($t->qualified, $t->url, $t->title());
+            $this->summaries[$t->qualified] = Reference::plain($t->doc->summary, $links);
+            foreach ($t->members as $m) {
+                string $label = "{$t->name}::{$m->name}";
+                if ($m->callable()) {
+                    $label->append('()');
+                }
+                if ($m->kind == 'constructor') {
+                    $label = "{$t->name}()";
+                }
+                $links->symbol("{$t->qualified}::{$m->name}", $m->url, $label);
+            }
+        }
+        foreach ($this->namespaces as $ns) {
+            foreach ($ns->functions as $m) {
+                string $q = $m->name->clone();
+                if ($ns->name->empty() == false) {
+                    $q = "{$ns->name}::{$m->name}";
+                }
+                string $label = "{$q}()";
+                $links->symbol($q, $m->url, $label);
+                $this->summaries[$q] = Reference::plain($m->doc->summary, $links);
+            }
+            foreach ($ns->constants as $m) {
+                string $q = $m->name->clone();
+                if ($ns->name->empty() == false) {
+                    $q = "{$ns->name}::{$m->name}";
+                }
+                $links->symbol($q, $m->url, $q);
+            }
+        }
+    }
+
+    /**
+     * Markdown source as plain text, for summaries in cards and search.
+     *
+     * @param $md The summary Markdown. Empty stays empty.
+     * @param $links Autolinking is off for the duration of the call, so a type name in a card is not a link.
+     */
+    public static function plain(const string& $md, Links $links) : string
+    {
+        if ($md->empty()) {
+            return '';
+        }
+        Document $doc = Document::parse($md, 1);
+        Inline $inline = Inline($doc, $links);
+        bool $autolink = $links->autolink;
+        $links->autolink = false;
+        string $text = Html::text($inline->render($md));
+        $links->autolink = $autolink;
+        return $text;
+    }
+
+    /**
+     * Every namespace, each one followed by the namespaces below it: `json`,
+     * `json::detail`, then `yaml`. The global namespace comes first.
+     */
+    public const function tree() : array<ApiNamespace>
+    {
+        array<ApiNamespace> $out = array<ApiNamespace>();
+        foreach ($this->namespaces as $ns) {
+            if ($ns->top()) {
+                $ns->flatten($out);
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * The sidebar of the reference: an overview link, then the namespaces as
+     * a tree. Each one lists its types, then the namespaces below it.
+     */
+    public function sidebar(const Site& $site) : Sidebar
+    {
+        Sidebar $side = Sidebar();
+        $side->base = $this->config->base;
+
+        SidebarItem $overview = SidebarItem();
+        $overview->text = 'Overview';
+        $overview->link = $this->config->base;
+        $side->items->push($overview);
+
+        foreach ($this->namespaces as $ns) {
+            if ($ns->top()) {
+                $side->items->push(Reference::branch($ns, true));
+            }
+        }
+        return $side;
+    }
+
+    /**
+     * One namespace as a sidebar group. A top one is titled with its full name
+     * and starts open. Deeper ones are titled with their last segment and
+     * start folded, unless they hold the current page.
+     */
+    private static function branch(ApiNamespace $ns, bool $top) : SidebarItem
+    {
+        SidebarItem $item = SidebarItem();
+        $item->text = $ns->leaf();
+        if ($top) {
+            $item->text = $ns->title();
+        }
+        if ($ns->hasPage()) {
+            $item->link = $ns->url;
+        }
+        $item->kind = 'ns';
+        $item->collapsed = $top == false;
+        foreach ($ns->types as $t) {
+            SidebarItem $type = SidebarItem();
+            $type->text = $t->name->clone();
+            $type->link = $t->url;
+            $type->kind = 'type';
+            $item->items->push($type);
+        }
+        foreach ($ns->children as $child) {
+            $item->items->push(Reference::branch($child, false));
+        }
+        return $item;
+    }
+
+    // ------------------------------------------------------------------------ pages
+
+    /**
+     * Every page of the reference, ready for `Layout`. The index first, then
+     * one page per type, then one per namespace that has a page.
+     *
+     * @param $site Title, version, base: the chrome around every page.
+     * @param $links The links `register()` filled. Without that, every type name in a signature is plain text and every `api:` link is a warning.
+     * @param $search Gets an entry for every page, section, and member.
+     * @return The index first, then one page per type, then one per namespace that has a page.
+     */
+    public function views(const Site& $site, Links $links, SearchIndex& $search) : array<PageView>
+    {
+        array<PageView> $out = array<PageView>();
+        $out->push(ApiPages::index($this, $site, $links, $search));
+        foreach ($this->types as $t) {
+            $out->push(ApiPages::type($this, $t, $site, $links, $search));
+        }
+        foreach ($this->namespaces as $ns) {
+            if ($ns->hasPage() == false) {
+                continue;
+            }
+            $out->push(ApiPages::space($this, $ns, $site, $links, $search));
+        }
+        return $out;
+    }
+}

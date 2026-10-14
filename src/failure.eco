@@ -1,0 +1,52 @@
+namespace ecodoc;
+
+/**
+ * Why a build stopped. Every fallible step returns `status<Failure>` or
+ * `result<T, Failure>`, and the command line prints `message()` and exits with `1`.
+ *
+ * ```echo
+ * Failure::io('x.md')->message();          // could not read or write x.md
+ * Failure::tool('echoc', 1)->message();    // echoc failed (exit 1)
+ * Failure::manifest('bad nav')->message(); // docs.eco: bad nav
+ * ```
+ *
+ * Four cases, on purpose. A failure names the kind of thing that broke and
+ * carries just enough to point at it. Which link, which line: that lives in
+ * the payload text. I kept this in one file because a namespaced payload enum
+ * copied across files has tripped the linker before.
+ */
+public enum Failure
+{
+    /**
+     * `docs.eco` is missing, unreadable, or says something ecodoc cannot use.
+     */
+    case manifest(string $detail);
+
+    /**
+     * A program ecodoc ran (`echoc`) did not finish cleanly.
+     */
+    case tool(string $step, int32 $code);
+
+    /**
+     * A file could not be read or written.
+     */
+    case io(string $path);
+
+    /**
+     * Anything else that cannot be built: a page, a flag, a broken link under `--strict`.
+     */
+    case input(string $detail);
+
+    /**
+     * One line for the terminal, without the `ecodoc: ` prefix the CLI adds.
+     */
+    public const function message() : string
+    {
+        return match ($this) {
+            Failure::manifest($detail) => "docs.eco: {$detail}",
+            Failure::tool($step, $code) => "{$step} failed (exit {$code})",
+            Failure::io($path) => "could not read or write {$path}",
+            Failure::input($detail) => $detail,
+        };
+    }
+}

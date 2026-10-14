@@ -1,0 +1,211 @@
+/*
+ * JSON accessors used by the site, the reference, and page frontmatter.
+ */
+
+namespace ecodoc::config;
+
+/**
+ * Readers over libjson where a missing key and a `null` mean the same thing: not there.
+ *
+ * ```echo
+ * json::Value $f = json::object();
+ * $f['title'] = json::str('CLI');
+ * $f['order'] = json::int(3);
+ * $f['draft'] = json::nil();
+ * echo Field::text($f, 'title');        // CLI
+ * echo Field::text($f, 'order');        // 3
+ * echo Field::int($f, 'order', 0);      // 3
+ * echo Field::has($f, 'draft');         // false
+ * echo Field::flag($f, 'draft', true);  // true
+ * ```
+ *
+ * Frontmatter, manifest attributes, and `echoc -p decls` output are all JSON
+ * that a person (or a compiler version) has filled in, or has not. None of
+ * these fail. They hand back an empty value or the fallback you gave, and
+ * the caller decides whether empty means "use the default" or "warn".
+ */
+public struct Field
+{
+    /**
+     * The value at `$key`. `null` when it is missing.
+     *
+     * @param $v The object to read. Anything else reads as missing.
+     * @param $key The field name.
+     */
+    public static function get(const json::Value& $v, const string& $key) : json::Value
+    {
+        return $v->get($key) ?? json::nil();
+    }
+
+    /**
+     * Whether `$key` is there and not `null`.
+     *
+     * @param $v The object to read. Anything else reads as missing.
+     * @param $key The field name.
+     */
+    public static function has(const json::Value& $v, const string& $key) : bool
+    {
+        json::Value $f = guard $v->get($key) else {
+            return false;
+        };
+        return $f->isNull() == false;
+    }
+
+    /**
+     * The string at `$key`. An integer comes back as its digits, since
+     * `version: 2` in frontmatter is still text to a reader. Anything else is empty.
+     *
+     * @param $v The object to read. Anything else reads as missing.
+     * @param $key The field name.
+     */
+    public static function text(const json::Value& $v, const string& $key) : string
+    {
+        json::Value $f = guard $v->get($key) else {
+            return '';
+        };
+        if ($f->isStr()) {
+            return $f->asStr() ?? '';
+        }
+        if ($f->isInt()) {
+            int64 $n = $f->asInt() ?? 0;
+            return "{$n}";
+        }
+        return '';
+    }
+
+    /**
+     * The integer at `$key`. A value that is not an object reads as missing.
+     *
+     * @param $v The object to read. Anything else reads as missing.
+     * @param $key The field name.
+     * @param $fallback What comes back when the key is missing, `null`, or not an integer.
+     */
+    public static function int(const json::Value& $v, const string& $key, int64 $fallback) : int64
+    {
+        json::Value $f = guard $v->get($key) else {
+            return $fallback;
+        };
+        return $f->asInt() ?? $fallback;
+    }
+
+    /**
+     * The boolean at `$key`.
+     *
+     * The fallback is the default the reader sees, so it is spelled out at
+     * every call: `Field::flag($front, 'outline', true)` reads as "outline is
+     * on unless the page says otherwise". `"yes"` as a string is not a boolean.
+     *
+     * @param $v The object to read. Anything else reads as missing.
+     * @param $key The field name.
+     * @param $fallback What comes back when the key is missing, `null`, or not a boolean. `"yes"` as a string is not a boolean.
+     */
+    public static function flag(const json::Value& $v, const string& $key, bool $fallback) : bool
+    {
+        json::Value $f = guard $v->get($key) else {
+            return $fallback;
+        };
+        return $f->asBool() ?? $fallback;
+    }
+
+    /**
+     * The array at `$key`. Empty when it is missing or not an array.
+     *
+     * @param $v The object to read. Anything else reads as missing.
+     * @param $key The field name.
+     */
+    public static function items(const json::Value& $v, const string& $key) : array<json::Value>
+    {
+        json::Value $f = guard $v->get($key) else {
+            return array<json::Value>();
+        };
+        return $f->asArray() ?? array<json::Value>();
+    }
+
+    /**
+     * A list of strings, or one string as a list of one.
+     *
+     * @param $v The object to read. Anything else reads as missing.
+     * @param $key The field name.
+     */
+    public static function strings(const json::Value& $v, const string& $key) : array<string>
+    {
+        array<string> $out = array<string>();
+        json::Value $f = guard $v->get($key) else {
+            return $out;
+        };
+        if ($f->isStr()) {
+            $out->push($f->asStr() ?? '');
+            return $out;
+        }
+        foreach ($f->asArray() ?? array<json::Value>() as $item) {
+            string? $s = $item->asStr();
+            if ($s != null) {
+                $out->push($s ?? '');
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * An attribute value as echoc prints it (`{kind, text|integer|...}`) as
+     * the plain JSON it stands for. A bare name reads as its text.
+     *
+     * @param $a One item of echoc's `attributes` list, with `kind` and a payload.
+     */
+    public static function attribute(const json::Value& $a) : json::Value
+    {
+        string $kind = Field::text($a, 'kind');
+        if ($kind == 'string' || $kind == 'name') {
+            return json::str(Field::text($a, 'text'));
+        }
+        if ($kind == 'int') {
+            return json::int(Field::int($a, 'integer', 0));
+        }
+        if ($kind == 'float') {
+            json::Value $n = Field::get($a, 'number');
+            return json::float($n->asFloat() ?? 0.0);
+        }
+        if ($kind == 'bool') {
+            return json::bool(Field::flag($a, 'boolean', false));
+        }
+        if ($kind == 'list') {
+            json::Value $list = json::arr();
+            foreach (Field::items($a, 'items') as $item) {
+                $list[] = Field::attribute($item);
+            }
+            return $list;
+        }
+        if ($kind == 'record') {
+            json::Value $obj = json::object();
+            foreach (Field::items($a, 'fields') as $f) {
+                $obj[Field::text($f, 'key')] = Field::attribute(Field::get($f, 'value'));
+            }
+            return $obj;
+        }
+        return json::nil();
+    }
+
+    /**
+     * Every `#[<ns>::name: value]` in a list of tool attributes, as one
+     * object keyed by name. A name written twice keeps its last value.
+     *
+     * @param $holder A declaration or the manifest JSON, with a `tools` array.
+     * @param $ns The attribute namespace to keep, `docs` for this site.
+     */
+    public static function tools(const json::Value& $holder, const string& $ns) : json::Value
+    {
+        json::Value $out = json::object();
+        foreach (Field::items($holder, 'tools') as $t) {
+            if (Field::text($t, 'namespace') != $ns) {
+                continue;
+            }
+            json::Value $value = Field::get($t, 'value');
+            if ($value->isNull()) {
+                $out[Field::text($t, 'name')] = json::bool(true);
+            } else {
+                $out[Field::text($t, 'name')] = Field::attribute($value);
+            }
+        }
+        return $out;
+    }
+}

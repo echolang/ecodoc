@@ -1,0 +1,26 @@
+use ecodoc::cli::Serve;
+
+#[group: "serve"]
+test relative_to_the_base
+{
+    assert((Serve::relative('/', '/') ?? 'x') == '');
+    assert((Serve::relative('/', '/guide/cli') ?? 'x') == 'guide/cli');
+    assert((Serve::relative('/repo/', '/repo/') ?? 'x') == '');
+    assert((Serve::relative('/repo/', '/repo/assets/site.css') ?? 'x') == 'assets/site.css');
+}
+
+#[group: "serve"]
+test outside_the_base
+{
+    assert(Serve::relative('/repo/', '/') == null);
+    assert(Serve::relative('/repo/', '/repo') == null);
+    assert(Serve::relative('/repo/', '/other/page') == null);
+}
+
+#[group: "serve"]
+test requested_is_rooted
+{
+    assert(Serve::requested('') == '/');
+    assert(Serve::requested('guide/') == '/guide/');
+    assert(Serve::requested('/x') == '/x');
+}

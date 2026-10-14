@@ -1,0 +1,29 @@
+/*
+ * ecodoc's own docs, built by itself. From the project root, `ecodoc build`
+ * writes the site to `docs/dist`.
+ */
+
+#[module: "docs"]
+
+#[docs::title: "ecodoc"]
+#[docs::description: "Documentation sites for Echo libraries, written in Echo."]
+#[docs::nav: [
+    { text: "Guide", link: "/guide/" },
+    { text: "API", link: "/api/" },
+    { text: "Echo", link: "https://echoc.dev" }
+]]
+#[docs::sidebar: [{ base: "/guide/", items: [
+    { text: "Start", items: [
+        { text: "Getting started", link: "/guide/" },
+        { text: "The manifest", link: "/guide/manifest" }
+    ] },
+    { text: "Writing", items: [
+        { text: "Pages", link: "/guide/pages" },
+        { text: "API reference", link: "/guide/api" }
+    ] },
+    { text: "Running", items: [
+        { text: "Command line", link: "/guide/cli" }
+    ] }
+] }]]
+#[docs::api: { manifest: "../module.eco", title: "API" }]
+#[docs::footer: { message: "Built with ecodoc." }]

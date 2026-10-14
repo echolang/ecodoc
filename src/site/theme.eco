@@ -1,0 +1,81 @@
+namespace ecodoc::site;
+
+use std::env;
+use std::io;
+use ecodoc::sys::{Path, Walk};
+
+internal extern {
+    function ecodoc_asset_count() : int32;
+    function ecodoc_asset_name(int32 $i) : ptr<const uint8>;
+    function ecodoc_asset_data(int32 $i) : ptr<const uint8>;
+    function ecodoc_asset_size(int32 $i) : uint64;
+}
+
+/**
+ * One theme file and where it is published under `assets/`.
+ */
+public struct Asset
+{
+    /**
+     * The path below `assets/`: `ecodoc.css` or `main.js`.
+     */
+    public string $name;
+
+    /**
+     * The file's bytes, CSS or JS or SVG as they are.
+     */
+    public string $bytes;
+}
+
+/**
+ * The theme's files: compiled into the binary by `tools/embed-theme.sh`, or
+ * read from the directory `$ECODOC_THEME` names while the theme is being worked on.
+ *
+ * ```sh
+ * ECODOC_THEME=theme ./ecobuild/ecodoc dev   # edit theme/, reload, no rebuild of ecodoc
+ * tools/embed-theme.sh                       # bake it back into c/theme.c when done
+ * ```
+ *
+ * I embed the theme so `ecodoc` is one binary with nothing to install next
+ * to it. Copy it to a CI box and it builds a site, CSS and all.
+ */
+public struct Theme
+{
+    /**
+     * Every theme file. Only fails when `$ECODOC_THEME` points at a file
+     * that cannot be read. The embedded copy can't fail.
+     */
+    public static function assets() : result<array<Asset>, Failure>
+    {
+        string $dir = string::from(env::var('ECODOC_THEME', ''));
+        if ($dir->empty() == false) {
+            return Theme::fromDisk($dir);
+        }
+        array<Asset> $out = array<Asset>();
+        int32 $n = ecodoc_asset_count();
+        for (int32 $i = 0; $i < $n; $i++) {
+            string $name = str::from(ecodoc_asset_name($i));
+            string $bytes = str::from(ecodoc_asset_data($i), ecodoc_asset_size($i) as usize);
+            $out->push(Asset($name, $bytes));
+        }
+        return .ok($out);
+    }
+
+    private static function fromDisk(const string& $dir) : result<array<Asset>, Failure>
+    {
+        array<Asset> $out = array<Asset>();
+        array<string> $skip = array<string>();
+        foreach (Walk::files($dir, '', $skip) as $rel) {
+            string $path = Path::join($dir, $rel);
+            string $bytes = guard io::readfile($path) else {
+                return .error(.io($path));
+            };
+            string $name = $rel->clone();
+            if ($rel->starts('js/')) {
+                $name = Path::base($rel);
+            }
+            $out->push(Asset($name, $bytes));
+        }
+        return .ok($out);
+    }
+}

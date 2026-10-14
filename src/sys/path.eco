@@ -1,0 +1,164 @@
+/*
+ * Join, split, stem, normalize. `/` only: files and URLs share the same functions.
+ */
+
+namespace ecodoc::sys;
+
+/**
+ * Paths and URLs as plain strings with `/` separators. ecodoc runs where
+ * echoc runs, macOS and Linux, so there is no other separator to handle.
+ *
+ * ```echo
+ * echo Path::join('docs', 'dist');     // docs/dist
+ * echo Path::dir('guide/cli.md');      // guide
+ * echo Path::stem('guide/cli.md');     // cli
+ * echo Path::ext('guide/cli.md');      // .md
+ * echo Path::normalize('a/./b/../c');  // a/c
+ * ```
+ *
+ * A path is a string. I skipped `std::fs::path` and a platform layer, so the
+ * same calls work on file paths and on URLs.
+ */
+public struct Path
+{
+    /**
+     * `$b` under `$a`, unless `$b` is already absolute.
+     *
+     * ```echo
+     * echo Path::join('docs', 'dist');    // docs/dist
+     * echo Path::join('docs/', 'dist');   // docs/dist
+     * echo Path::join('docs', '/tmp');    // /tmp
+     * echo Path::join('.', 'index.md');   // index.md
+     * ```
+     */
+    public static function join(const string& $a, const string& $b) : string
+    {
+        if ($b->starts('/') || $a->empty() || $a == '.') {
+            return $b->clone();
+        }
+        if ($b->empty()) {
+            return $a->clone();
+        }
+        if ($a->ends('/')) {
+            return "{$a}{$b}";
+        }
+        return "{$a}/{$b}";
+    }
+
+    /**
+     * Everything before the last `/`, or `.` when there is none.
+     */
+    public static function dir(const string& $path) : string
+    {
+        usize $at = Path::lastSlash($path);
+        if ($at >= $path->size()) {
+            return '.';
+        }
+        if ($at == 0) {
+            return '/';
+        }
+        return $path->sub(0, $at);
+    }
+
+    /**
+     * Everything after the last `/`.
+     */
+    public static function base(const string& $path) : string
+    {
+        usize $at = Path::lastSlash($path);
+        if ($at >= $path->size()) {
+            return $path->clone();
+        }
+        return $path->sub($at + 1, $path->size() - $at - 1);
+    }
+
+    /**
+     * The name without its last extension: `guide/intro.md` is `intro`.
+     */
+    public static function stem(const string& $path) : string
+    {
+        string $name = Path::base($path);
+        usize $dot = Path::lastByte($name, 46);
+        if ($dot >= $name->size() || $dot == 0) {
+            return $name;
+        }
+        return $name->sub(0, $dot);
+    }
+
+    /**
+     * The last extension with its dot, `.md`, or empty when there is none.
+     */
+    public static function ext(const string& $path) : string
+    {
+        string $name = Path::base($path);
+        usize $dot = Path::lastByte($name, 46);
+        if ($dot >= $name->size() || $dot == 0) {
+            return '';
+        }
+        return $name->sub($dot, $name->size() - $dot);
+    }
+
+    /**
+     * `.` and `..` resolved, doubled slashes dropped. A leading `/` and a
+     * trailing one are kept, since both mean something in a URL.
+     */
+    public static function normalize(const string& $path) : string
+    {
+        bool $absolute = $path->starts('/');
+        bool $trailing = $path->ends('/') && $path->size() > 1;
+        array<string> $kept = array<string>();
+        foreach (str::split($path, '/')->owned() as $part) {
+            if ($part->empty() || $part == '.') {
+                continue;
+            }
+            if ($part == '..') {
+                if ($kept->count() > 0 && $kept[$kept->count() - 1] != '..') {
+                    $kept->pop();
+                } else if ($absolute == false) {
+                    $kept->push($part);
+                }
+                continue;
+            }
+            $kept->push($part);
+        }
+        string $out = '';
+        if ($absolute) {
+            $out->append('/');
+        }
+        $out->append(str::join($kept, '/'));
+        if ($trailing && $out->ends('/') == false) {
+            $out->append('/');
+        }
+        if ($out->empty()) {
+            return '.';
+        }
+        return $out;
+    }
+
+    private static function lastSlash(const string& $path) : usize
+    {
+        return Path::lastByte($path, 47);
+    }
+
+    /**
+     * The index of the last `$byte` in `$text`, searching from the end.
+     *
+     * "Not found" is the size, not `-1`, the same way `string::find` reports
+     * it. So the check is `$at >= $text->size()`, and the index is unsigned.
+     *
+     * @param $text Searched from the end.
+     * @param $byte A separator, like `ch::DOT` or `ch::SLASH`.
+     * @return The index of the last match, or `$text->size()` when there is none.
+     */
+    public static function lastByte(const string& $text, uint8 $byte) : usize
+    {
+        usize $i = $text->size();
+        while ($i > 0) {
+            $i = $i - 1;
+            if ($text->byte($i) == $byte) {
+                return $i;
+            }
+        }
+        return $text->size();
+    }
+}

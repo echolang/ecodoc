@@ -1,0 +1,137 @@
+/*
+ * Line-oriented string helpers the Markdown readers share.
+ */
+
+namespace ecodoc::text;
+
+use ecodoc::text::ch;
+
+/**
+ * Split text into lines, then ask about indent, blankness, runs of a byte.
+ */
+public struct Lines
+{
+    /**
+     * Split on `\n`, dropping a `\r` before it and expanding tabs in the
+     * indentation to four spaces.
+     */
+    public static function split(const string& $text) : array<string>
+    {
+        array<string> $out = array<string>();
+        foreach (str::split($text, "\n")->owned() as $raw) {
+            string $line = $raw->clone();
+            if ($line->ends("\r")) {
+                $line = $line->sub(0, $line->size() - 1);
+            }
+            $out->push(Lines::untab($line));
+        }
+        return $out;
+    }
+
+    private static function untab(const string& $line) : string
+    {
+        usize $i = 0;
+        while ($i < $line->size() && ($line->byte($i) == ch::SPACE || $line->byte($i) == ch::TAB)) {
+            if ($line->byte($i) == ch::TAB) {
+                string $out = '';
+                usize $col = 0;
+                usize $j = 0;
+                while ($j < $line->size() && ($line->byte($j) == ch::SPACE || $line->byte($j) == ch::TAB)) {
+                    if ($line->byte($j) == ch::TAB) {
+                        usize $to = $col + 4 - $col % 4;
+                        while ($col < $to) {
+                            $out->push(ch::SPACE);
+                            $col = $col + 1;
+                        }
+                    } else {
+                        $out->push(ch::SPACE);
+                        $col = $col + 1;
+                    }
+                    $j = $j + 1;
+                }
+                $out->append($line->sub($j, $line->size() - $j));
+                return $out;
+            }
+            $i = $i + 1;
+        }
+        return $line->clone();
+    }
+
+    /**
+     * Whether `$text` holds `$literal` starting at byte `$at`. Never reads
+     * past the end, so it is safe as a lookahead.
+     */
+    public static function at(const string& $text, usize $at, const string& $literal) : bool
+    {
+        if ($at > $text->size() || $literal->size() > $text->size() - $at) {
+            return false;
+        }
+        for (usize $k = 0; $k < $literal->size(); $k++) {
+            if ($text->byte($at + $k) != $literal->byte($k)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * How many spaces `$line` starts with. Tabs are already spaces after `split()`.
+     */
+    public static function indent(const string& $line) : usize
+    {
+        usize $i = 0;
+        while ($i < $line->size() && $line->byte($i) == ch::SPACE) {
+            $i = $i + 1;
+        }
+        return $i;
+    }
+
+    /**
+     * Whether `$line` is empty or only spaces.
+     */
+    public static function blank(const string& $line) : bool
+    {
+        return Lines::indent($line) == $line->size();
+    }
+
+    /**
+     * `$line` without up to `$n` leading spaces.
+     */
+    public static function dedent(const string& $line, usize $n) : string
+    {
+        usize $i = 0;
+        while ($i < $n && $i < $line->size() && $line->byte($i) == ch::SPACE) {
+            $i = $i + 1;
+        }
+        return $line->sub($i, $line->size() - $i);
+    }
+
+    /**
+     * How many times `$byte` repeats from `$at`.
+     */
+    public static function run(const string& $line, usize $at, uint8 $byte) : usize
+    {
+        usize $i = $at;
+        while ($i < $line->size() && $line->byte($i) == $byte) {
+            $i = $i + 1;
+        }
+        return $i - $at;
+    }
+
+    /**
+     * Whether `$line` is nothing but `$byte` (at least `$min` of it) and spaces.
+     */
+    public static function only(const string& $line, uint8 $byte, usize $min) : bool
+    {
+        usize $count = 0;
+        for (usize $i = 0; $i < $line->size(); $i++) {
+            uint8 $b = $line->byte($i);
+            if ($b == $byte) {
+                $count = $count + 1;
+            } else if ($b != ch::SPACE && $b != ch::TAB) {
+                return false;
+            }
+        }
+        return $count >= $min;
+    }
+}

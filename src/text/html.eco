@@ -1,0 +1,209 @@
+/*
+ * HTML as a string. No parser, no DOM.
+ */
+
+namespace ecodoc::text;
+
+use ecodoc::text::ch;
+
+/**
+ * HTML text handling: escaping on the way out, a little recognition on the
+ * way in (Markdown passes raw HTML through), and tag stripping for the
+ * plain text search and the outline need.
+ *
+ * ```echo
+ * echo Html::escape('<b>');          // &lt;b&gt;
+ * echo Html::escape('"');            // &quot;
+ * echo Html::escape('R&D');          // R&amp;D
+ * echo Html::text('<b>R&amp;D</b>');  // R&D
+ * echo Html::tagName('</DIV>');      // div
+ * ```
+ *
+ * The single quote is not escaped. Every attribute ecodoc writes is
+ * double-quoted, so there is nothing for an apostrophe to break.
+ */
+public struct Html
+{
+    /**
+     * `$text` safe inside an element or a double-quoted attribute.
+     */
+    public static function escape(const string& $text) : string
+    {
+        string $out = '';
+        $out->reserve($text->size() + 8);
+        Html::escapeInto($text, $out);
+        return $out;
+    }
+
+    /**
+     * Append byte `$b` to `$out`, as an entity when it is `&`, `<`, `>` or `"`.
+     */
+    public static function escapeByte(uint8 $b, string& $out) : void
+    {
+        if ($b == ch::AMP) {
+            $out->append('&amp;');
+        } else if ($b == ch::LT) {
+            $out->append('&lt;');
+        } else if ($b == ch::GT) {
+            $out->append('&gt;');
+        } else if ($b == ch::QUOTE) {
+            $out->append('&quot;');
+        } else {
+            $out->push($b);
+        }
+    }
+
+    /**
+     * Escape `$text` onto the end of `$out`.
+     */
+    public static function escapeInto(const string& $text, string& $out) : void
+    {
+        usize $from = 0;
+        for (usize $i = 0; $i < $text->size(); $i++) {
+            uint8 $b = $text->byte($i);
+            if ($b != ch::AMP && $b != ch::LT && $b != ch::GT && $b != ch::QUOTE) {
+                continue;
+            }
+            if ($i > $from) {
+                $out->append($text->sub($from, $i - $from));
+            }
+            Html::escapeByte($b, $out);
+            $from = $i + 1;
+        }
+        if ($from < $text->size()) {
+            $out->append($text->sub($from, $text->size() - $from));
+        }
+    }
+
+    /**
+     * The lowercased tag name `$t` opens or closes with, `div` for both
+     * `<div class="x">` and `</div>`, or empty when it starts no tag.
+     */
+    public static function tagName(const string& $t) : string
+    {
+        if ($t->starts('<') == false) {
+            return '';
+        }
+        usize $i = 1;
+        if ($i < $t->size() && $t->byte($i) == ch::SLASH) {
+            $i = $i + 1;
+        }
+        usize $start = $i;
+        if ($i >= $t->size() || Ascii::alpha($t->byte($i)) == false || $t->byte($i) >= 128) {
+            return '';
+        }
+        while ($i < $t->size() && (Ascii::word($t->byte($i)) || $t->byte($i) == ch::DASH) && $t->byte($i) < 128) {
+            $i = $i + 1;
+        }
+        if ($i < $t->size()) {
+            uint8 $b = $t->byte($i);
+            if ($b != ch::SPACE && $b != ch::GT && $b != ch::SLASH && $b != ch::TAB) {
+                return '';
+            }
+        }
+        return str::lower($t->sub($start, $i - $start));
+    }
+
+    /**
+     * Tags whose content is not Markdown and runs through to the closing tag.
+     */
+    public static function raw(const string& $name) : bool
+    {
+        return $name == 'script' || $name == 'pre' || $name == 'style' || $name == 'textarea';
+    }
+
+    /**
+     * Block-level tags, which open an HTML block even inside a paragraph.
+     */
+    public static function block(const string& $name) : bool
+    {
+        array<string> $names = [
+            'address', 'article', 'aside', 'blockquote', 'body', 'caption', 'center', 'col', 'colgroup',
+            'dd', 'details', 'dialog', 'dir', 'div', 'dl', 'dt', 'fieldset', 'figcaption', 'figure',
+            'footer', 'form', 'frame', 'frameset', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'head', 'header',
+            'hr', 'html', 'iframe', 'legend', 'li', 'link', 'main', 'menu', 'menuitem', 'nav', 'noframes',
+            'ol', 'optgroup', 'option', 'p', 'param', 'picture', 'section', 'source', 'summary', 'table',
+            'tbody', 'td', 'tfoot', 'th', 'thead', 'title', 'tr', 'track', 'ul', 'video', 'audio', 'svg'
+        ];
+        foreach ($names as $n) {
+            if ($n == $name) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * `$html` with its tags removed and the entities this renderer writes
+     * turned back into text. Whitespace collapses to single spaces.
+     */
+    public static function text(const string& $html) : string
+    {
+        string $out = '';
+        bool $inTag = false;
+        bool $space = false;
+        usize $i = 0;
+        while ($i < $html->size()) {
+            uint8 $b = $html->byte($i);
+            if ($inTag) {
+                if ($b == ch::GT) {
+                    $inTag = false;
+                }
+                $i = $i + 1;
+                continue;
+            }
+            if ($b == ch::LT) {
+                $inTag = true;
+                $i = $i + 1;
+                continue;
+            }
+            if (Ascii::space($b)) {
+                $space = $out->empty() == false;
+                $i = $i + 1;
+                continue;
+            }
+            if ($space) {
+                $out->push(ch::SPACE);
+                $space = false;
+            }
+            if ($b == ch::AMP) {
+                usize $semi = $html->find(';', $i);
+                if ($semi < $html->size() && $semi - $i <= 8) {
+                    string $entity = $html->sub($i, $semi - $i + 1);
+                    string $plain = Html::entity($entity);
+                    if ($plain->empty() == false) {
+                        $out->append($plain);
+                        $i = $semi + 1;
+                        continue;
+                    }
+                }
+            }
+            $out->push($b);
+            $i = $i + 1;
+        }
+        return $out;
+    }
+
+    private static function entity(const string& $e) : string
+    {
+        if ($e == '&amp;') {
+            return '&';
+        }
+        if ($e == '&lt;') {
+            return '<';
+        }
+        if ($e == '&gt;') {
+            return '>';
+        }
+        if ($e == '&quot;') {
+            return '"';
+        }
+        if ($e == '&#39;' || $e == '&apos;') {
+            return "'";
+        }
+        if ($e == '&nbsp;') {
+            return ' ';
+        }
+        return '';
+    }
+}

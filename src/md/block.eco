@@ -1,0 +1,1067 @@
+/*
+ * Block Markdown: lines into a tree. Inline syntax stays as source until `Inline` renders it.
+ */
+
+namespace ecodoc::md;
+
+use ecodoc::text::{Ascii, Html, Lines};
+use ecodoc::text::ch;
+
+/**
+ * What a `Block` is. Leaves carry text; containers carry children.
+ */
+public enum BlockKind
+{
+    /**
+     * Running text, kept as inline source.
+     */
+    case paragraph;
+
+    /**
+     * `#` to `######`, or a line underlined with `===` or `---`.
+     */
+    case heading;
+
+    /**
+     * A fenced or indented code block.
+     */
+    case code;
+
+    /**
+     * A `>` quote, with children.
+     */
+    case quote;
+
+    /**
+     * A quote that opens with `[!NOTE]` and friends, with children.
+     */
+    case alert;
+
+    /**
+     * An ordered or bullet list. Its children are `item`s.
+     */
+    case list;
+
+    /**
+     * One list item, with children.
+     */
+    case item;
+
+    /**
+     * A pipe table, cells in `rows`.
+     */
+    case table;
+
+    /**
+     * Raw HTML, passed through as written.
+     */
+    case html;
+
+    /**
+     * A thematic break, `---`.
+     */
+    case rule;
+
+    /**
+     * A `::: tip` block, with children.
+     */
+    case container;
+}
+
+/**
+ * One block. Leaves keep their source in `text`; containers keep children.
+ */
+public class Block
+{
+    /**
+     * What this block is. The other properties only mean something for some kinds.
+     */
+    public BlockKind $kind;
+
+    /**
+     * Inline source for a paragraph or heading, the body of a code block,
+     * the raw markup of an HTML block.
+     */
+    public string $text = '';
+
+    /**
+     * A fence's info string, a container's or alert's kind.
+     */
+    public string $info = '';
+
+    /**
+     * A container's or alert's written title, empty for the default.
+     */
+    public string $title = '';
+
+    /**
+     * A heading's level.
+     */
+    public int32 $level = 0;
+
+    /**
+     * A heading's `{#id}`, empty when it gets a slug.
+     */
+    public string $id = '';
+
+    /**
+     * A list's kind: numbered or bullets.
+     */
+    public bool $ordered = false;
+
+    /**
+     * An ordered list's first number, `3` for a list that starts at `3.`.
+     */
+    public int64 $start = 1;
+
+    /**
+     * A list without blank lines between its items. Tight items render
+     * without `<p>`: a compact list, not one that breathes.
+     */
+    public bool $tight = true;
+
+    /**
+     * The 1-based source line the block starts on.
+     */
+    public int32 $line = 0;
+
+    /**
+     * The blocks inside a quote, alert, list, item or container.
+     */
+    public array<Block> $children = array<Block>();
+
+    /**
+     * A table's cells, the header row first.
+     */
+    public array<array<string>> $rows = array<array<string>>();
+
+    /**
+     * A table's column alignment: empty, `left`, `center` or `right`.
+     */
+    public array<string> $align = array<string>();
+
+    /**
+     * An empty block of `$kind` starting on source line `$line`.
+     */
+    constructor(BlockKind $kind, int32 $line)
+    {
+        $this->kind = $kind;
+        $this->line = $line;
+    }
+}
+
+/**
+ * A `[label]: destination "title"` written somewhere in the document.
+ */
+public struct LinkRef
+{
+    /**
+     * The destination, as written.
+     */
+    public string $href;
+
+    /**
+     * The optional `"title"`, empty when there is none.
+     */
+    public string $title;
+}
+
+/**
+ * A parsed Markdown document: its blocks and the link references they may name.
+ *
+ * ```echo
+ * string $md = "# A\n\n*Hi*.\n\n[a]: /";
+ * Document $doc = Document::parse($md, 1);
+ * echo $doc->blocks->count();       // 2
+ * echo $doc->blocks[0]->level;      // 1
+ * echo $doc->blocks[1]->text;       // *Hi*.
+ * echo $doc->refs->get('a')->href;  // /
+ * ```
+ *
+ * The dialect is CommonMark's block structure plus what docs lean on: pipe
+ * tables, `::: tip` containers, `> [!NOTE]` alerts and `{#id}` on headings.
+ * I read containers line-wise: a list item or a quote collects its lines,
+ * strips its marker, and parses them as a document of its own. That is why
+ * the paragraph in the example still has its stars.
+ */
+public class Document
+{
+    /**
+     * The top-level blocks, in source order.
+     */
+    public array<Block> $blocks = array<Block>();
+
+    /**
+     * Every `[label]: destination` in the document, keyed by `Document::label`.
+     * Collected while parsing, they leave no block behind.
+     */
+    public map<string, LinkRef> $refs = map<string, LinkRef>();
+
+    /**
+     * Parse `$text`. `$firstLine` is the line `$text` starts on in its file,
+     * so a page with frontmatter still reports the lines you see.
+     */
+    public static function parse(const string& $text, int32 $firstLine) : Document
+    {
+        Document $doc = Document();
+        array<string> $lines = Lines::split($text);
+        $doc->blocks = BlockParser::run($lines, $doc, 0, $firstLine);
+        return $doc;
+    }
+
+    /**
+     * The key a reference label is stored under. Case and inner whitespace do not matter.
+     */
+    public static function label(const string& $raw) : string
+    {
+        string $out = '';
+        bool $gap = false;
+        foreach (str::split(str::trim($raw), ' ')->owned() as $word) {
+            if ($word->empty()) {
+                continue;
+            }
+            if ($gap) {
+                $out->append(' ');
+            }
+            $out->append(str::lower($word));
+            $gap = true;
+        }
+        return $out;
+    }
+}
+
+/**
+ * Where a list item's marker ends and what kind it was.
+ */
+public struct ListMarker
+{
+    /**
+     * A number marker, `1.` or `1)`.
+     */
+    public bool $ordered = false;
+
+    /**
+     * The number of an ordered marker.
+     */
+    public int64 $start = 1;
+
+    /**
+     * `-`, `*`, `+`, or for an ordered list `.` or `)`.
+     */
+    public uint8 $symbol = 0;
+
+    /**
+     * The column the item's content starts at.
+     */
+    public usize $content = 0;
+
+    /**
+     * Whether anything follows the marker on its line.
+     */
+    public bool $filled = false;
+
+    /**
+     * Whether `$line` had a list marker at all. When it is false, nothing else here means anything.
+     */
+    public bool $found = false;
+
+    /**
+     * Read a list marker at the start of `$line`, if there is one.
+     */
+    public static function read(const string& $line) : ListMarker
+    {
+        ListMarker $m = ListMarker();
+        usize $ind = Lines::indent($line);
+        if ($ind >= 4 || $ind >= $line->size()) {
+            return $m;
+        }
+        uint8 $b = $line->byte($ind);
+        usize $after = $ind;
+        if ($b == ch::DASH || $b == ch::STAR || $b == ch::PLUS) {
+            $m->symbol = $b;
+            $after = $ind + 1;
+        } else if (Ascii::digit($b)) {
+            usize $j = $ind;
+            while ($j < $line->size() && Ascii::digit($line->byte($j)) && $j - $ind < 9) {
+                $j = $j + 1;
+            }
+            if ($j >= $line->size() || ($line->byte($j) != ch::DOT && $line->byte($j) != ch::RPAREN)) {
+                return $m;
+            }
+            $m->ordered = true;
+            $m->start = str::int($line->sub($ind, $j - $ind)) ?? 1;
+            $m->symbol = $line->byte($j);
+            $after = $j + 1;
+        } else {
+            return $m;
+        }
+        if ($after < $line->size() && $line->byte($after) != ch::SPACE) {
+            return $m;
+        }
+        usize $spaces = Lines::run($line, $after, ch::SPACE);
+        $m->filled = $after + $spaces < $line->size();
+        if ($m->filled == false || $spaces > 4) {
+            $m->content = $after + 1;
+        } else {
+            $m->content = $after + $spaces;
+        }
+        $m->found = true;
+        return $m;
+    }
+
+    /**
+     * Whether an item with marker `$other` belongs to the same list. A `-`
+     * list followed by a `*` item is two lists, as CommonMark has it.
+     */
+    public const function continues(const ListMarker& $other) : bool
+    {
+        return $this->ordered == $other->ordered && $this->symbol == $other->symbol;
+    }
+}
+
+/**
+ * Walks the lines of a document (or of a quote, a list item, a container)
+ * and emits blocks. Nested containers recurse, depth-capped at 32.
+ */
+public struct BlockParser
+{
+    /**
+     * The blocks of `$lines`. `$line` is the source line of `$lines[0]`.
+     */
+    public static function run(const array<string>& $lines, Document& $doc, int32 $depth, int32 $line) : array<Block>
+    {
+        array<Block> $out = array<Block>();
+        if ($depth > 32) {
+            Block $deep = Block(.paragraph, $line);
+            $deep->text = str::join($lines, "\n");
+            $out->push($deep);
+            return $out;
+        }
+
+        array<string> $para = array<string>();
+        int32 $paraLine = $line;
+        usize $n = $lines->count();
+        usize $i = 0;
+
+        while ($i < $n) {
+            string $l = $lines[$i];
+            int32 $at = $line + ($i as int32);
+            usize $ind = Lines::indent($l);
+
+            if ($ind == $l->size()) {
+                BlockParser::flush($para, $paraLine, $doc, $out);
+                $i = $i + 1;
+                continue;
+            }
+
+            // indented code, which cannot interrupt a paragraph
+            if ($ind >= 4 && $para->empty()) {
+                $i = BlockParser::indented($lines, $i, $at, $out);
+                continue;
+            }
+
+            if ($ind < 4) {
+                string $t = $l->sub($ind, $l->size() - $ind);
+                uint8 $first = $t->byte(0);
+
+                if (($first == ch::BACKTICK || $first == ch::TILDE) && Lines::run($t, 0, $first) >= 3
+                    && BlockParser::fenceInfoOk($t, $first)) {
+                    BlockParser::flush($para, $paraLine, $doc, $out);
+                    $i = BlockParser::fence($lines, $i, $ind, $at, $out);
+                    continue;
+                }
+
+                if ($first == ch::COLON && Lines::run($t, 0, ch::COLON) >= 3 && BlockParser::containerName($t)->empty() == false) {
+                    BlockParser::flush($para, $paraLine, $doc, $out);
+                    $i = BlockParser::container($lines, $i, $doc, $depth, $at, $out);
+                    continue;
+                }
+
+                if ($first == ch::HASH && BlockParser::atx($t) > 0) {
+                    BlockParser::flush($para, $paraLine, $doc, $out);
+                    $out->push(BlockParser::heading($t, $at));
+                    $i = $i + 1;
+                    continue;
+                }
+
+                // setext underline turns the open paragraph into a heading
+                if ($para->empty() == false && (Lines::only($t, ch::EQ, 1) || Lines::only($t, ch::DASH, 1))
+                    && $t->contains(' ') == false) {
+                    Block $h = Block(.heading, $paraLine);
+                    $h->level = 2;
+                    if ($first == ch::EQ) {
+                        $h->level = 1;
+                    }
+                    $h->text = str::trim(str::join($para, "\n"));
+                    BlockParser::takeId($h);
+                    $para->clear();
+                    $out->push($h);
+                    $i = $i + 1;
+                    continue;
+                }
+
+                if (($first == ch::DASH || $first == ch::STAR || $first == ch::UNDERSCORE) && Lines::only($t, $first, 3)) {
+                    BlockParser::flush($para, $paraLine, $doc, $out);
+                    $out->push(Block(.rule, $at));
+                    $i = $i + 1;
+                    continue;
+                }
+
+                if ($first == ch::GT) {
+                    BlockParser::flush($para, $paraLine, $doc, $out);
+                    $i = BlockParser::quote($lines, $i, $doc, $depth, $at, $out);
+                    continue;
+                }
+
+                ListMarker $marker = ListMarker::read($l);
+                if ($marker->found && ($para->empty() || ($marker->filled && ($marker->ordered == false || $marker->start == 1)))) {
+                    BlockParser::flush($para, $paraLine, $doc, $out);
+                    $i = BlockParser::list($lines, $i, $doc, $depth, $at, $out);
+                    continue;
+                }
+
+                if ($first == ch::LT && BlockParser::htmlStart($t, $para->empty())) {
+                    BlockParser::flush($para, $paraLine, $doc, $out);
+                    $i = BlockParser::html($lines, $i, $at, $out);
+                    continue;
+                }
+
+                if ($i + 1 < $n && $t->contains('|') && BlockParser::delimiterRow($lines[$i + 1])) {
+                    usize $cols = Table::cells($t)->count();
+                    if ($cols == Table::cells(str::trim($lines[$i + 1]))->count()) {
+                        BlockParser::flush($para, $paraLine, $doc, $out);
+                        $i = BlockParser::table($lines, $i, $at, $out);
+                        continue;
+                    }
+                }
+            }
+
+            if ($para->empty()) {
+                $paraLine = $at;
+            }
+            $para->push(str::ltrim($l));
+            $i = $i + 1;
+        }
+
+        BlockParser::flush($para, $paraLine, $doc, $out);
+        return $out;
+    }
+
+    /**
+     * Close the open paragraph, taking any link reference definitions off its front.
+     */
+    private static function flush(array<string>& $para, int32 $line, Document& $doc, array<Block>& $out) : void
+    {
+        if ($para->empty()) {
+            return;
+        }
+        usize $skip = 0;
+        while ($skip < $para->count() && BlockParser::definition($para[$skip], $doc)) {
+            $skip = $skip + 1;
+        }
+        if ($skip < $para->count()) {
+            string $text = '';
+            for (usize $k = $skip; $k < $para->count(); $k++) {
+                if ($k > $skip) {
+                    $text->append("\n");
+                }
+                $text->append($para[$k]);
+            }
+            Block $p = Block(.paragraph, $line + ($skip as int32));
+            $p->text = str::rtrim($text);
+            $out->push($p);
+        }
+        $para->clear();
+    }
+
+    /**
+     * Record `[label]: href "title"` if `$line` is one.
+     */
+    private static function definition(const string& $line, Document& $doc) : bool
+    {
+        if ($line->starts('[') == false) {
+            return false;
+        }
+        usize $close = $line->find(']:');
+        if ($close >= $line->size() || $close < 2) {
+            return false;
+        }
+        string $label = Document::label($line->sub(1, $close - 1));
+        string $rest = str::trim($line->sub($close + 2, $line->size() - $close - 2));
+        if ($label->empty() || $rest->empty()) {
+            return false;
+        }
+        string $href = $rest->clone();
+        string $title = '';
+        usize $space = $rest->find(' ');
+        if ($space < $rest->size()) {
+            $href = $rest->sub(0, $space);
+            string $t = str::trim($rest->sub($space + 1, $rest->size() - $space - 1));
+            if ($t->size() >= 2) {
+                $title = $t->sub(1, $t->size() - 2);
+            }
+        }
+        if ($href->starts('<') && $href->ends('>')) {
+            $href = $href->sub(1, $href->size() - 2);
+        }
+        if ($doc->refs->has($label) == false) {
+            $doc->refs[$label] = LinkRef($href, $title);
+        }
+        return true;
+    }
+
+    private static function indented(const array<string>& $lines, usize $from, int32 $at, array<Block>& $out) : usize
+    {
+        array<string> $body = array<string>();
+        usize $i = $from;
+        while ($i < $lines->count()) {
+            string $l = $lines[$i];
+            if (Lines::blank($l)) {
+                $body->push('');
+            } else if (Lines::indent($l) >= 4) {
+                $body->push(Lines::dedent($l, 4));
+            } else {
+                break;
+            }
+            $i = $i + 1;
+        }
+        while ($body->count() > 0 && $body[$body->count() - 1]->empty()) {
+            $body->pop();
+        }
+        Block $code = Block(.code, $at);
+        $code->text = str::join($body, "\n");
+        $out->push($code);
+        return $i;
+    }
+
+    /**
+     * A backtick fence's info string may not hold a backtick.
+     */
+    private static function fenceInfoOk(const string& $t, uint8 $fence) : bool
+    {
+        if ($fence != ch::BACKTICK) {
+            return true;
+        }
+        usize $run = Lines::run($t, 0, $fence);
+        return $t->find('`', $run) >= $t->size();
+    }
+
+    private static function fence(const array<string>& $lines, usize $from, usize $ind, int32 $at, array<Block>& $out) : usize
+    {
+        string $open = $lines[$from]->sub($ind, $lines[$from]->size() - $ind);
+        uint8 $fence = $open->byte(0);
+        usize $len = Lines::run($open, 0, $fence);
+        Block $code = Block(.code, $at);
+        $code->info = str::trim($open->sub($len, $open->size() - $len));
+
+        array<string> $body = array<string>();
+        usize $i = $from + 1;
+        while ($i < $lines->count()) {
+            string $l = $lines[$i];
+            usize $li = Lines::indent($l);
+            if ($li < 4 && $li < $l->size() && $l->byte($li) == $fence
+                && Lines::run($l, $li, $fence) >= $len && Lines::only($l, $fence, $len)) {
+                $i = $i + 1;
+                break;
+            }
+            $body->push(Lines::dedent($l, $ind));
+            $i = $i + 1;
+        }
+        $code->text = str::join($body, "\n");
+        $out->push($code);
+        return $i;
+    }
+
+    /**
+     * The word after a `:::` opener, `tip` in `::: tip Watch out`.
+     */
+    private static function containerName(const string& $t) : string
+    {
+        usize $colons = Lines::run($t, 0, ch::COLON);
+        string $rest = str::trim($t->sub($colons, $t->size() - $colons));
+        usize $space = $rest->find(' ');
+        if ($space < $rest->size()) {
+            return $rest->sub(0, $space);
+        }
+        return $rest;
+    }
+
+    private static function container(const array<string>& $lines, usize $from, Document& $doc, int32 $depth, int32 $at, array<Block>& $out) : usize
+    {
+        string $open = str::trim($lines[$from]);
+        usize $colons = Lines::run($open, 0, ch::COLON);
+        string $rest = str::trim($open->sub($colons, $open->size() - $colons));
+        Block $box = Block(.container, $at);
+        usize $space = $rest->find(' ');
+        if ($space < $rest->size()) {
+            $box->info = str::lower($rest->sub(0, $space));
+            $box->title = str::trim($rest->sub($space + 1, $rest->size() - $space - 1));
+        } else {
+            $box->info = str::lower($rest);
+        }
+
+        array<string> $body = array<string>();
+        int32 $nested = 0;
+        usize $i = $from + 1;
+        bool $inFence = false;
+        while ($i < $lines->count()) {
+            string $l = $lines[$i];
+            string $t = str::trim($l);
+            if ($t->starts('```') || $t->starts('~~~')) {
+                $inFence = $inFence == false;
+            }
+            if ($inFence == false && $t->starts(':::')) {
+                usize $c = Lines::run($t, 0, ch::COLON);
+                if ($c == $t->size() && $c >= $colons) {
+                    if ($nested == 0) {
+                        $i = $i + 1;
+                        break;
+                    }
+                    $nested = $nested - 1;
+                } else if ($c == $colons && BlockParser::containerName($t)->empty() == false) {
+                    $nested = $nested + 1;
+                }
+            }
+            $body->push($l);
+            $i = $i + 1;
+        }
+        $box->children = BlockParser::run($body, $doc, $depth + 1, $at + 1);
+        $out->push($box);
+        return $i;
+    }
+
+    /**
+     * The level of an ATX heading line, or 0 when it is not one.
+     */
+    private static function atx(const string& $t) : int32
+    {
+        usize $hashes = Lines::run($t, 0, ch::HASH);
+        if ($hashes == 0 || $hashes > 6) {
+            return 0;
+        }
+        if ($hashes < $t->size() && $t->byte($hashes) != ch::SPACE) {
+            return 0;
+        }
+        return $hashes as int32;
+    }
+
+    private static function heading(const string& $t, int32 $at) : Block
+    {
+        Block $h = Block(.heading, $at);
+        $h->level = BlockParser::atx($t);
+        usize $hashes = $h->level as usize;
+        string $text = str::trim($t->sub($hashes, $t->size() - $hashes));
+
+        // a closing run of #s, when a space sits before it
+        usize $end = $text->size();
+        while ($end > 0 && $text->byte($end - 1) == ch::HASH) {
+            $end = $end - 1;
+        }
+        if ($end == 0) {
+            $text = '';
+        } else if ($end < $text->size() && $text->byte($end - 1) == ch::SPACE) {
+            $text = str::trim($text->sub(0, $end));
+        }
+        $h->text = $text;
+        BlockParser::takeId($h);
+        return $h;
+    }
+
+    /**
+     * Move a trailing `{#id}` off a heading's text into its id.
+     */
+    private static function takeId(Block& $h) : void
+    {
+        if ($h->text->ends('}') == false) {
+            return;
+        }
+        usize $open = $h->text->find('{#');
+        if ($open >= $h->text->size()) {
+            return;
+        }
+        string $id = $h->text->sub($open + 2, $h->text->size() - $open - 3);
+        if ($id->empty() || $id->contains(' ')) {
+            return;
+        }
+        $h->id = $id;
+        $h->text = str::trim($h->text->sub(0, $open));
+    }
+
+    private static function quote(const array<string>& $lines, usize $from, Document& $doc, int32 $depth, int32 $at, array<Block>& $out) : usize
+    {
+        array<string> $body = array<string>();
+        usize $i = $from;
+        bool $lazy = false;
+        while ($i < $lines->count()) {
+            string $l = $lines[$i];
+            usize $ind = Lines::indent($l);
+            if ($ind < 4 && $ind < $l->size() && $l->byte($ind) == ch::GT) {
+                usize $s = $ind + 1;
+                if ($s < $l->size() && $l->byte($s) == ch::SPACE) {
+                    $s = $s + 1;
+                }
+                string $inner = $l->sub($s, $l->size() - $s);
+                $body->push($inner);
+                $lazy = Lines::blank($inner) == false && BlockParser::startsBlock($inner) == false;
+                $i = $i + 1;
+                continue;
+            }
+            if ($lazy && Lines::blank($l) == false && BlockParser::startsBlock($l) == false) {
+                $body->push(str::ltrim($l));
+                $i = $i + 1;
+                continue;
+            }
+            break;
+        }
+
+        // `> [!NOTE]` on the first line makes the quote an alert
+        if ($body->count() > 0) {
+            string $head = str::trim($body[0]);
+            if ($head->starts('[!') && $head->ends(']')) {
+                string $kind = str::lower($head->sub(2, $head->size() - 3));
+                if (Alerts::known($kind)) {
+                    Block $alert = Block(.alert, $at);
+                    $alert->info = $kind;
+                    array<string> $rest = array<string>();
+                    for (usize $k = 1; $k < $body->count(); $k++) {
+                        $rest->push($body[$k]);
+                    }
+                    $alert->children = BlockParser::run($rest, $doc, $depth + 1, $at + 1);
+                    $out->push($alert);
+                    return $i;
+                }
+            }
+        }
+
+        Block $q = Block(.quote, $at);
+        $q->children = BlockParser::run($body, $doc, $depth + 1, $at);
+        $out->push($q);
+        return $i;
+    }
+
+    /**
+     * Whether `$l` opens a block that ends a lazy continuation.
+     */
+    private static function startsBlock(const string& $l) : bool
+    {
+        usize $ind = Lines::indent($l);
+        if ($ind >= 4 || $ind >= $l->size()) {
+            return false;
+        }
+        string $t = $l->sub($ind, $l->size() - $ind);
+        uint8 $b = $t->byte(0);
+        if ($b == ch::GT || ($b == ch::HASH && BlockParser::atx($t) > 0)) {
+            return true;
+        }
+        if (($b == ch::BACKTICK || $b == ch::TILDE) && Lines::run($t, 0, $b) >= 3) {
+            return true;
+        }
+        if ($b == ch::COLON && Lines::run($t, 0, ch::COLON) >= 3) {
+            return true;
+        }
+        if (($b == ch::DASH || $b == ch::STAR || $b == ch::UNDERSCORE) && Lines::only($t, $b, 3)) {
+            return true;
+        }
+        return ListMarker::read($l)->found;
+    }
+
+    private static function list(const array<string>& $lines, usize $from, Document& $doc, int32 $depth, int32 $at, array<Block>& $out) : usize
+    {
+        ListMarker $first = ListMarker::read($lines[$from]);
+        Block $list = Block(.list, $at);
+        $list->ordered = $first->ordered;
+        $list->start = $first->start;
+
+        usize $i = $from;
+        bool $loose = false;
+        while ($i < $lines->count()) {
+            ListMarker $m = ListMarker::read($lines[$i]);
+            if ($m->found == false || $m->continues($first) == false) {
+                break;
+            }
+            string $l = $lines[$i];
+            array<string> $body = array<string>();
+            if ($m->content < $l->size()) {
+                $body->push($l->sub($m->content, $l->size() - $m->content));
+            } else {
+                $body->push('');
+            }
+            int32 $itemLine = $at + (($i - $from) as int32);
+            $i = $i + 1;
+
+            bool $inFence = false;
+            bool $blankInside = false;
+            while ($i < $lines->count()) {
+                string $next = $lines[$i];
+                if (Lines::blank($next)) {
+                    $body->push('');
+                    $i = $i + 1;
+                    continue;
+                }
+                usize $ind = Lines::indent($next);
+                if ($ind >= $m->content) {
+                    string $inner = $next->sub($m->content, $next->size() - $m->content);
+                    string $tt = str::trim($inner);
+                    if ($tt->starts('```') || $tt->starts('~~~')) {
+                        $inFence = $inFence == false;
+                    }
+                    if ($inFence == false && $body->count() > 1 && $body[$body->count() - 1]->empty()) {
+                        $blankInside = true;
+                    }
+                    $body->push($inner);
+                    $i = $i + 1;
+                    continue;
+                }
+                // lazy continuation of the item's last paragraph
+                bool $lastText = $body->count() > 0 && $body[$body->count() - 1]->empty() == false;
+                if ($lastText && $inFence == false && BlockParser::startsBlock($next) == false) {
+                    $body->push(str::ltrim($next));
+                    $i = $i + 1;
+                    continue;
+                }
+                break;
+            }
+
+            // blank lines after the item belong to the gap, not the item
+            usize $trailing = 0;
+            while ($body->count() > 1 && $body[$body->count() - 1]->empty()) {
+                $body->pop();
+                $trailing = $trailing + 1;
+            }
+            if ($blankInside) {
+                $loose = true;
+            }
+
+            Block $item = Block(.item, $itemLine);
+            $item->children = BlockParser::run($body, $doc, $depth + 1, $itemLine);
+            $list->children->push($item);
+
+            if ($trailing > 0) {
+                if ($i < $lines->count() && ListMarker::read($lines[$i])->found && ListMarker::read($lines[$i])->continues($first)) {
+                    $loose = true;
+                } else {
+                    break;
+                }
+            }
+        }
+        $list->tight = $loose == false;
+        $out->push($list);
+        return $i;
+    }
+
+    /**
+     * Whether a line starting with `<` opens an HTML block.
+     */
+    private static function htmlStart(const string& $t, bool $canInterrupt) : bool
+    {
+        if ($t->starts('<!--') || $t->starts('<?') || $t->starts('<!')) {
+            return true;
+        }
+        string $name = Html::tagName($t);
+        if ($name->empty()) {
+            return false;
+        }
+        if (Html::raw($name) || Html::block($name)) {
+            return true;
+        }
+        // any lone complete tag, as long as it does not cut a paragraph
+        return $canInterrupt && $t->ends('>');
+    }
+
+    private static function html(const array<string>& $lines, usize $from, int32 $at, array<Block>& $out) : usize
+    {
+        string $t = str::trim($lines[$from]);
+        string $name = Html::tagName($t);
+        string $end = '';
+        if ($t->starts('<!--')) {
+            $end = '-->';
+        } else if ($t->starts('<?')) {
+            $end = '?>';
+        } else if (Html::raw($name) && $t->starts('</') == false) {
+            $end = "</{$name}>";
+        }
+
+        array<string> $body = array<string>();
+        usize $i = $from;
+        while ($i < $lines->count()) {
+            string $l = $lines[$i];
+            if ($end->empty()) {
+                if (Lines::blank($l)) {
+                    break;
+                }
+                $body->push($l);
+                $i = $i + 1;
+                continue;
+            }
+            $body->push($l);
+            $i = $i + 1;
+            if (str::lower($l)->contains($end)) {
+                break;
+            }
+        }
+        Block $block = Block(.html, $at);
+        $block->text = str::join($body, "\n");
+        $out->push($block);
+        return $i;
+    }
+
+    private static function delimiterRow(const string& $line) : bool
+    {
+        string $t = str::trim($line);
+        if ($t->contains('-') == false) {
+            return false;
+        }
+        array<string> $cells = Table::cells($t);
+        if ($cells->empty()) {
+            return false;
+        }
+        foreach ($cells as $c) {
+            string $cell = str::trim($c);
+            if ($cell->empty()) {
+                return false;
+            }
+            for (usize $k = 0; $k < $cell->size(); $k++) {
+                uint8 $b = $cell->byte($k);
+                if ($b != ch::DASH && $b != ch::COLON) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private static function table(const array<string>& $lines, usize $from, int32 $at, array<Block>& $out) : usize
+    {
+        Block $table = Block(.table, $at);
+        array<string> $header = Table::cells(str::trim($lines[$from]));
+        foreach (Table::cells(str::trim($lines[$from + 1])) as $d) {
+            string $cell = str::trim($d);
+            bool $left = $cell->starts(':');
+            bool $right = $cell->ends(':');
+            if ($left && $right) {
+                $table->align->push('center');
+            } else if ($right) {
+                $table->align->push('right');
+            } else if ($left) {
+                $table->align->push('left');
+            } else {
+                $table->align->push('');
+            }
+        }
+        $table->rows->push($header);
+        usize $cols = $header->count();
+        usize $i = $from + 2;
+        while ($i < $lines->count()) {
+            string $l = $lines[$i];
+            if (Lines::blank($l) || BlockParser::startsBlock($l)) {
+                break;
+            }
+            array<string> $row = Table::cells(str::trim($l));
+            while ($row->count() < $cols) {
+                $row->push('');
+            }
+            while ($row->count() > $cols) {
+                $row->pop();
+            }
+            $table->rows->push($row);
+            $i = $i + 1;
+        }
+        $out->push($table);
+        return $i;
+    }
+}
+
+/**
+ * Split a pipe-table row into cells.
+ */
+public struct Table
+{
+    /**
+     * The cells of one row. Split on `|` that is neither escaped nor inside a
+     * code span, drop the outer pipes, trim each cell.
+     */
+    public static function cells(const string& $row) : array<string>
+    {
+        array<string> $cells = array<string>();
+        string $cur = '';
+        bool $code = false;
+        usize $start = 0;
+        usize $end = $row->size();
+        if ($row->starts('|')) {
+            $start = 1;
+        }
+        if ($end > $start && $row->ends('|') && ($end < 2 || $row->byte($end - 2) != ch::BACKSLASH)) {
+            $end = $end - 1;
+        }
+        usize $i = $start;
+        while ($i < $end) {
+            uint8 $b = $row->byte($i);
+            if ($b == ch::BACKSLASH && $i + 1 < $end && $row->byte($i + 1) == ch::PIPE) {
+                $cur->push(ch::PIPE);
+                $i = $i + 2;
+                continue;
+            }
+            if ($b == ch::BACKTICK) {
+                $code = $code == false;
+            }
+            if ($b == ch::PIPE && $code == false) {
+                $cells->push(str::trim($cur));
+                $cur = '';
+                $i = $i + 1;
+                continue;
+            }
+            $cur->push($b);
+            $i = $i + 1;
+        }
+        $cells->push(str::trim($cur));
+        return $cells;
+    }
+}
+
+/**
+ * The alert kinds a `> [!KIND]` quote may name: note, tip, important,
+ * warning and caution, plus `compile` for an error the compiler catches.
+ */
+public struct Alerts
+{
+    /**
+     * Whether `$kind`, already lowercased, is one of the six. A `> [!FOO]`
+     * that is not stays a plain quote.
+     */
+    public static function known(const string& $kind) : bool
+    {
+        return $kind == 'note' || $kind == 'tip' || $kind == 'important' || $kind == 'warning'
+            || $kind == 'caution' || $kind == 'compile';
+    }
+
+    /**
+     * The default title for an alert or a container of `$kind`, used when none is written.
+     *
+     * ```echo
+     * echo Alerts::title('warning');  // Warning
+     * echo Alerts::title('tip');      // Tip
+     * ```
+     *
+     * `compile` is the odd one: its title is "Caught at compile time", for
+     * the error a reader would otherwise only meet at build time.
+     */
+    public static function title(const string& $kind) : string
+    {
+        if ($kind == 'compile') {
+            return 'Caught at compile time';
+        }
+        if ($kind == 'details') {
+            return 'Details';
+        }
+        if ($kind == 'danger') {
+            return 'Danger';
+        }
+        if ($kind == 'info') {
+            return 'Info';
+        }
+        if ($kind->empty()) {
+            return '';
+        }
+        return str::ucfirst($kind);
+    }
+}

@@ -1,0 +1,830 @@
+namespace ecodoc::api;
+
+use std::io;
+use ecodoc::config::{Field, Site};
+use ecodoc::md::{CodeBlock, Document, Inline, Renderer, Slugger};
+use ecodoc::site::{Icons, Links, PageView, SearchIndex, TocGroup, TocItem, Wave};
+use ecodoc::sys::Path;
+use ecodoc::text::Html;
+
+/**
+ * The reference's pages, as the design draws them: a hero with the type's
+ * name and generics, a meta readout, an "At a glance" example, then numbered
+ * sections of members. Each section is a full entry, or a list of compact
+ * rows when every member of it is a one-liner.
+ *
+ * You are looking at one. This page is `ApiPages::type` drawing `ApiPages`,
+ * from the docblock above `public struct ApiPages` in `src/api/pages.eco`.
+ *
+ * The page functions return a `PageView` and write nothing. `Builder` does the writing.
+ */
+public struct ApiPages
+{
+    /**
+     * The reference's landing page at `/api/`: the library, then a section
+     * per namespace, parents before children, with a card per type and its summary.
+     *
+     * @param $ref Already `register()`ed with `$links` when `Builder` calls this.
+     * @param $site Title, version, base: the chrome around the page.
+     * @param $links Resolves type names in summaries and `api:` links.
+     * @param $search This page adds itself here.
+     */
+    public static function index(Reference $ref, const Site& $site, Links $links, SearchIndex& $search) : PageView
+    {
+        PageView $v = ApiPages::view($ref->config->base, $ref->config->title);
+        string $out = '';
+        $out->append('<section class="hero">');
+        $out->append(Wave::svg());
+        $out->append('<nav aria-label="Breadcrumb" class="crumbs mono"><span class="here">');
+        Html::escapeInto($ref->library, $out);
+        $out->append('</span></nav><div class="titlerow"><h1 class="h1">');
+        Html::escapeInto($ref->config->title, $out);
+        $out->append('</h1><span class="badges"><span class="badge">reference</span>');
+        if ($site->version->empty() == false) {
+            $out->append('<span class="badge outline">');
+            Html::escapeInto($site->version, $out);
+            $out->append('</span>');
+        }
+        $out->append('</span></div>');
+        if ($site->description->empty() == false) {
+            $out->append('<p class="lede">');
+            Html::escapeInto($site->description, $out);
+            $out->append('</p>');
+        }
+        usize $members = $ref->symbolCount() - $ref->types->count();
+        usize $spaces = 0;
+        foreach ($ref->namespaces as $ns) {
+            if ($ns->hasPage()) {
+                $spaces = $spaces + 1;
+            }
+        }
+        ApiPages::meta($out, 'Types', "{$ref->types->count()}", 'Namespaces', "{$spaces}", 'Members', "{$members}");
+        $out->append('</section>');
+
+        // a section per namespace with types, in tree order, so `ecodoc::md::` follows `ecodoc::`
+        usize $n = 1;
+        foreach ($ref->tree() as $ns) {
+            if ($ns->types->empty()) {
+                continue;
+            }
+            string $id = $ns->slug();
+            ApiPages::spaceDivider($out, $n, $id, $ns, $links);
+            ApiPages::cards($ref, $ns->types, $links, $out);
+            $v->toc->push(TocGroup($id, $ns->title()));
+            $n = $n + 1;
+        }
+        $v->main = $out;
+        $v->description = $site->description;
+        $search->add($links->url($v->url), $ref->config->title, $ref->library, 'page', 'page', $site->description, '');
+        return $v;
+    }
+
+    private static function cards(Reference $ref, const array<ApiType>& $types, Links $links, string& $out) : void
+    {
+        $out->append('<div class="listing">');
+        foreach ($types as $t) {
+            ApiPages::listingCard($out, $links, $t->url, $t->kind, $t->title(), $ref->summary($t->qualified), $t->qualified);
+        }
+        $out->append('</div>');
+    }
+
+    private static function view(const string& $url, const string& $title) : PageView
+    {
+        PageView $v = PageView();
+        $v->url = $url->clone();
+        $v->title = $title->clone();
+        $v->section = 'API reference';
+        $v->layout = .doc;
+        return $v;
+    }
+
+    private static function listingCard(string& $out, Links $links, const string& $url, const string& $kind, const string& $title, const string& $text, const string& $full) : void
+    {
+        string $href = Html::escape($links->url($url));
+        string $k = Html::escape($kind);
+        string $t = Html::escape($title);
+        string $f = Html::escape($full);
+        $out->append("<a href=\"{$href}\" title=\"{$f}\"><span class=\"kind {$k}\">{$k}</span><span class=\"listing-name\">{$t}</span>");
+        if ($text->empty() == false) {
+            $out->append('<span class="listing-text">');
+            Html::escapeInto($text, $out);
+            $out->append('</span>');
+        }
+        $out->append('</a>');
+    }
+
+    private static function meta(string& $out, const string& $l1, const string& $v1, const string& $l2, const string& $v2, const string& $l3, const string& $v3) : void
+    {
+        $out->append('<div class="meta">');
+        ApiPages::metaCell($out, $l1, $v1);
+        ApiPages::metaCell($out, $l2, $v2);
+        ApiPages::metaCell($out, $l3, $v3);
+        $out->append('</div>');
+    }
+
+    private static function metaCell(string& $out, const string& $label, const string& $value) : void
+    {
+        $out->append('<div><div class="meta-label">');
+        Html::escapeInto($label, $out);
+        $out->append('</div><div class="meta-value">');
+        Html::escapeInto($value, $out);
+        $out->append('</div></div>');
+    }
+
+    private static function divider(string& $out, usize $n, const string& $id, const string& $label) : void
+    {
+        ApiPages::dividerOpen($out, $n, $id, '<h2>');
+        Html::escapeInto($label, $out);
+        $out->append('</h2><span class="divider-line"></span></div>');
+    }
+
+    private static function dividerOpen(string& $out, usize $n, const string& $id, const string& $h2) : void
+    {
+        string $num = ApiPages::number($n);
+        string $safe = Html::escape($id);
+        $out->append("<div class=\"divider\" id=\"{$safe}\"><span class=\"divider-num\">{$num}</span>{$h2}");
+    }
+
+    /**
+     * A divider titled with a namespace's full name, as written, linking to
+     * its page when it has one.
+     */
+    private static function spaceDivider(string& $out, usize $n, const string& $id, ApiNamespace $ns, Links $links) : void
+    {
+        ApiPages::dividerOpen($out, $n, $id, '<h2 class="mono">');
+        if ($ns->hasPage()) {
+            string $href = Html::escape($links->url($ns->url));
+            $out->append("<a href=\"{$href}\">");
+            Html::escapeInto($ns->title(), $out);
+            $out->append('</a>');
+        } else {
+            Html::escapeInto($ns->title(), $out);
+        }
+        $out->append('</h2><span class="divider-line"></span></div>');
+    }
+
+    /**
+     * `07`, `12`: the number of a divider, two digits when it is under 10.
+     */
+    private static function number(usize $n) : string
+    {
+        if ($n < 10) {
+            return "0{$n}";
+        }
+        return "{$n}";
+    }
+
+    /**
+     * Markdown from a docblock, rendered with symbol names resolved against `$scope` first.
+     *
+     * @param $md The docblock body, already stripped of comment markers.
+     * @param $links Restored after the call, so a nested render cannot leak `$scope`.
+     * @param $scope The type or namespace a bare `get()` means first.
+     * @param $page The source path warnings are tagged with.
+     */
+    private static function markdown(const string& $md, Links $links, const string& $scope, const string& $page) : string
+    {
+        if (str::trim($md)->empty()) {
+            return '';
+        }
+        string $oldScope = $links->scope;
+        string $oldPage = $links->page;
+        $links->scope = $scope;
+        $links->page = $page;
+        Renderer $r = Renderer($links);
+        string $html = $r->document(Document::parse($md, 1));
+        $links->scope = $oldScope;
+        $links->page = $oldPage;
+        return $html;
+    }
+
+    // ------------------------------------------------------------------------ a type
+
+    /**
+     * The page of one type: hero, "At a glance", overview, then a numbered
+     * section per member group.
+     *
+     * The type's docblock is split three ways. The summary is the hero's
+     * lede, the first ```` ```echo ```` fence is "At a glance" (unless
+     * `#[docs::example:]` names a file), and the rest is the overview.
+     *
+     * @param $ref The library this type belongs to.
+     * @param $t The type to draw. `$links` uses it as the scope, so a bare `get()` means this type's `get`.
+     * @param $site Title, version, source links: the chrome around the page.
+     * @param $links Resolves type names in the docblock and `api:` links.
+     * @param $search This page adds itself here.
+     */
+    public static function type(Reference $ref, ApiType $t, const Site& $site, Links $links, SearchIndex& $search) : PageView
+    {
+        PageView $v = ApiPages::view($t->url, $t->title());
+        string $out = '';
+        string $summary = ApiPages::markdown($t->doc->summary, $links, $t->qualified, $t->url);
+
+        // the hero
+        $out->append('<section class="hero">');
+        $out->append(Wave::svg());
+        ApiPages::crumbs($ref, $links, $t->ns, $t->name, $out);
+        string $long = '';
+        if ($t->name->size() > 14) {
+            $long = ' long';
+        }
+        $out->append("<div class=\"titlerow\"><h1 class=\"h1{$long}\">");
+        Html::escapeInto($t->name, $out);
+        string $generics = Spell::generics($t->decl);
+        if ($generics->empty() == false) {
+            $out->append('<span class="gen">');
+            Html::escapeInto($generics, $out);
+            $out->append('</span>');
+        }
+        $out->append('</h1><span class="badges">');
+        string $kind = Html::escape($t->kind);
+        $out->append("<span class=\"badge\">{$kind}</span>");
+        if ($generics->empty() == false) {
+            $out->append('<span class="badge outline">generic</span>');
+        }
+        ApiPages::lifecycle($t->tools, $out);
+        $out->append('</span></div>');
+        if ($summary->empty() == false) {
+            $out->append('<div class="lede">');
+            $out->append($summary);
+            $out->append('</div>');
+        }
+
+        usize $members = 0;
+        usize $ctors = 0;
+        foreach ($t->members as $m) {
+            if ($m->section == 'Constructors') {
+                $ctors = $ctors + 1;
+            } else {
+                $members = $members + 1;
+            }
+        }
+        $out->append('<div class="meta">');
+        ApiPages::metaCell($out, 'Members', "{$members}");
+        ApiPages::metaCell($out, 'Constructors', "{$ctors}");
+        ApiPages::metaCell($out, 'Kind', $t->kind);
+        $out->append('<div><div class="meta-label">Source</div>');
+        ApiPages::source($site, $t->decl, 'meta-link', $out);
+        $out->append('</div></div></section>');
+
+        // at a glance: the type's example, from its docblock or #[docs::example]
+        string $example = ApiPages::example($ref, $t->tools, $t->doc);
+        string $exampleTitle = Field::text($t->tools, 'example');
+        if ($example->empty() == false) {
+            $out->append('<section class="overview" id="overview"><div class="overview-head"><h2>At a glance</h2><span class="overview-note">Code on the left · what it <span>echoes</span> on the right</span></div>');
+            string $info = 'echo';
+            if ($exampleTitle->empty() == false) {
+                string $file = Path::base($exampleTitle);
+                $info = "echo title=\"{$file}\"";
+            }
+            CodeBlock::render($info, $example, $out);
+            $v->toc->push(TocGroup('overview', 'At a glance'));
+        }
+        string $prose = $t->doc->restWithoutExample;
+        if (Field::has($t->tools, 'example')) {
+            $prose = $t->doc->rest;
+        }
+        string $proseHtml = ApiPages::markdown($prose, $links, $t->qualified, $t->url);
+        if ($proseHtml->empty() == false) {
+            if ($example->empty()) {
+                $out->append('<section class="overview" id="overview"><div class="overview-head"><h2>Overview</h2></div>');
+                $v->toc->push(TocGroup('overview', 'Overview'));
+            }
+            $out->append('<div class="body-text doc">');
+            $out->append($proseHtml);
+            $out->append('</div>');
+        }
+        if ($example->empty() == false || $proseHtml->empty() == false) {
+            $out->append('</section>');
+        }
+
+        // the sections
+        usize $n = 1;
+        foreach (Reference::sections($t) as $section) {
+            array<ApiMember> $in = array<ApiMember>();
+            foreach ($t->members as $m) {
+                if ($m->section == $section) {
+                    $in->push($m);
+                }
+            }
+            string $id = Slugger::of($section);
+            ApiPages::section($ref, $t->qualified, $section, $id, $n, $in, $site, $links, $search, $v, $out);
+            $search->add("{$links->url($t->url)}#{$id}", $section, $t->name, 'section', 'section', '', '');
+            $n = $n + 1;
+        }
+        if ($t->extensions->empty() == false) {
+            ApiPages::section($ref, $t->qualified, 'Extensions', 'extensions', $n, $t->extensions, $site, $links, $search, $v, $out);
+            $n = $n + 1;
+        }
+
+        // related: what it conforms to, then #[docs::see:]
+        array<string> $related = array<string>();
+        foreach (Field::items($t->decl, 'conforms') as $c) {
+            $related->push(Field::text($c, 'name'));
+        }
+        foreach (Field::strings($t->tools, 'see') as $s) {
+            $related->push($s);
+        }
+        array<string> $cards = array<string>();
+        foreach ($related as $r) {
+            string $old = $links->scope;
+            $links->scope = $t->qualified;
+            string? $q = $links->resolve($r);
+            $links->scope = $old;
+            if ($q == null) {
+                continue;
+            }
+            $cards->push($q ?? '');
+        }
+        if ($cards->empty() == false) {
+            ApiPages::divider($out, $n, 'related', 'Related');
+            $out->append('<div class="related">');
+            foreach ($cards as $q) {
+                string $href = Html::escape($links->url($links->symbols->get($q)));
+                string $label = Html::escape($links->labels->get($q));
+                $out->append("<a href=\"{$href}\"><span class=\"related-name\">{$label}</span>");
+                string $text = $ref->summary($q);
+                if ($text->empty() == false) {
+                    $out->append('<span class="related-text">');
+                    Html::escapeInto($text, $out);
+                    $out->append('</span>');
+                }
+                $out->append('</a>');
+            }
+            $out->append('</div>');
+            $v->toc->push(TocGroup('related', 'Related'));
+        }
+
+        $v->main = $out;
+        $v->description = $ref->summary($t->qualified);
+        $search->add($links->url($t->url), $t->title(), ApiPages::where($ref, $t->ns), 'module', 'type', $v->description, $t->qualified);
+        return $v;
+    }
+
+    private static function where(Reference $ref, const string& $ns) : string
+    {
+        if ($ns->empty()) {
+            return $ref->library->clone();
+        }
+        return "{$ns}::";
+    }
+
+    private static function crumbs(Reference $ref, Links $links, const string& $ns, const string& $here, string& $out) : void
+    {
+        $out->append('<nav aria-label="Breadcrumb" class="crumbs mono">');
+        string $home = Html::escape($links->url($ref->config->base));
+        $out->append("<a href=\"{$home}\">");
+        Html::escapeInto($ref->library, $out);
+        $out->append('</a><span>/</span>');
+        if ($ns->empty() == false) {
+            string $at = '';
+            foreach (str::split($ns, '::')->owned() as $part) {
+                if ($at->empty() == false) {
+                    $at->append('::');
+                }
+                $at->append($part);
+                if ($links->symbols->has($at)) {
+                    string $href = Html::escape($links->url($links->symbols->get($at)));
+                    $out->append("<a href=\"{$href}\">");
+                    Html::escapeInto($part, $out);
+                    $out->append('</a><span>/</span>');
+                } else {
+                    $out->append('<span>');
+                    Html::escapeInto($part, $out);
+                    $out->append('</span><span>/</span>');
+                }
+            }
+        }
+        $out->append('<span class="here">');
+        Html::escapeInto($here, $out);
+        $out->append('</span></nav>');
+    }
+
+    private static function lifecycle(const json::Value& $tools, string& $out) : void
+    {
+        string $since = Field::text($tools, 'since');
+        if ($since->empty() == false) {
+            $out->append('<span class="badge outline">since ');
+            Html::escapeInto($since, $out);
+            $out->append('</span>');
+        }
+        if (Field::has($tools, 'deprecated')) {
+            $out->append('<span class="badge warn">deprecated</span>');
+        }
+    }
+
+    /**
+     * The example for a type or member: `#[docs::example: "file.eco"]`
+     * relative to the library, else the docblock's first ```echo fence.
+     *
+     * @param $ref Supplies the library root for a relative `#[docs::example:]` path.
+     * @param $tools The `#[docs::*]` attributes on the declaration.
+     * @param $doc Fallback when no file is named, or the file cannot be read.
+     */
+    private static function example(Reference $ref, const json::Value& $tools, const Docblock& $doc) : string
+    {
+        string $file = Field::text($tools, 'example');
+        if ($file->empty() == false) {
+            string $path = Path::join($ref->root, $file);
+            string $text = io::readfile($path)->or('');
+            if ($text->empty() == false) {
+                return $text;
+            }
+            io::eprintln("ecodoc: #[docs::example:] names {$path}, which could not be read");
+        }
+        return $doc->example->clone();
+    }
+
+    /**
+     * A link to where a declaration is written, shown as `src/value.eco` with
+     * an out-arrow, when the manifest says where the source is browsable.
+     *
+     * @param $site `$source` is the browse prefix; empty means a name with no link.
+     * @param $decl echoc's declaration, with `file` and `line`.
+     * @param $cls The CSS class on the link, `src` or `member-src`.
+     * @param $out Appended to. A missing file still writes a placeholder.
+     */
+    private static function source(const Site& $site, const json::Value& $decl, const string& $cls, string& $out) : void
+    {
+        string $file = Field::text($decl, 'file');
+        if ($file->empty()) {
+            $out->append('<span class="member-src">—</span>');
+            return;
+        }
+        int64 $line = Field::int($decl, 'line', 0);
+        string $name = Html::escape(Path::base($file));
+        string $c = Html::escape($cls);
+        if ($site->source->empty()) {
+            $out->append("<span class=\"{$c}\">{$name}</span>");
+            return;
+        }
+        string $href = Html::escape("{$site->source}{$file}#L{$line}");
+        $out->append("<a class=\"{$c}\" href=\"{$href}\" target=\"_blank\" rel=\"noreferrer\">{$name}");
+        $out->append(Icons::arrow());
+        $out->append('</a>');
+    }
+
+    // ------------------------------------------------------------------------ members
+
+    private static function compact(ApiMember $m) : bool
+    {
+        if (Field::has($m->tools, 'compact')) {
+            return true;
+        }
+        return $m->decls->count() == 1 && str::trim($m->doc->rest)->empty() && Field::has($m->tools, 'outcomes') == false
+            && Field::has($m->tools, 'example') == false && $m->doc->params->empty();
+    }
+
+    private static function section(
+        Reference $ref,
+        const string& $scope,
+        const string& $label,
+        const string& $id,
+        usize $n,
+        const array<ApiMember>& $members,
+        const Site& $site,
+        Links $links,
+        SearchIndex& $search,
+        PageView& $v,
+        string& $out
+    ) : void
+    {
+        ApiPages::divider($out, $n, $id, $label);
+        TocGroup $group = TocGroup($id, $label);
+
+        bool $compact = $members->count() >= 2;
+        foreach ($members as $m) {
+            if (ApiPages::compact($m) == false) {
+                $compact = false;
+            }
+        }
+        if ($compact) {
+            $out->append('<div class="compact-list">');
+        }
+        foreach ($members as $m) {
+            if ($compact) {
+                ApiPages::row($m, $scope, $links, $out);
+            } else {
+                ApiPages::member($ref, $m, $scope, $site, $links, $out);
+            }
+            $group->items->push(TocItem($m->anchor, ApiPages::memberLabel($m), $m->letter()));
+            string $owner = Links::lastSegment($m->owner);
+            if ($owner->empty()) {
+                $owner = 'Global';
+            }
+            string $summary = Reference::plain($m->doc->summary, $links);
+            string $url = $links->url($m->url);
+            $search->add($url, $m->name, "{$owner} › {$label}", 'member', $m->chip(), $summary, Spell::brief($m->decls[0]));
+        }
+        if ($compact) {
+            $out->append('</div>');
+        }
+        $v->toc->push($group);
+    }
+
+    private static function memberLabel(ApiMember $m) : string
+    {
+        if ($m->kind == 'constructor') {
+            return 'constructor';
+        }
+        if ($m->kind == 'operator') {
+            string $sym = Spell::operatorSymbol($m->name);
+            return "operator {$sym}";
+        }
+        return $m->name->clone();
+    }
+
+    /**
+     * The name line. A full entry leads with its kind; a compact row leads
+     * with its name and keeps the kind and the anchor on the right.
+     */
+    private static function head(ApiMember $m, string& $out, bool $compact) : void
+    {
+        string $badge = Html::escape($m->badge());
+        string $anchor = Html::escape($m->anchor);
+        string $link = "<a href=\"#{$anchor}\" class=\"member-anchor\" aria-label=\"Link to {$anchor}\">#</a>";
+        $out->append('<div class="member-head">');
+        if ($compact == false) {
+            $out->append("<span class=\"kind {$badge}\">{$badge}</span>");
+        }
+        $out->append('<h3 class="member-name">');
+        Html::escapeInto(ApiPages::memberLabel($m), $out);
+        $out->append('</h3>');
+        if ($compact == false) {
+            $out->append($link);
+        }
+        ApiPages::lifecycle($m->tools, $out);
+        $out->append('<span class="grow"></span>');
+        if ($compact) {
+            $out->append($link);
+            $out->append("<span class=\"kind {$badge}\">{$badge}</span>");
+        }
+    }
+
+    /**
+     * `#[docs::valid:]` as the pill: `always`, or the condition the member
+     * needs before it can be called.
+     */
+    private static function validity(ApiMember $m, string& $out, bool $compact) : void
+    {
+        string $valid = Field::text($m->tools, 'valid');
+        if ($valid->empty()) {
+            return;
+        }
+        if ($compact) {
+            if ($valid == 'always') {
+                $out->append('<span class="lamp-only" role="img" aria-label="Always valid" title="Always valid"></span>');
+            } else {
+                string $label = Html::escape("Only when {$valid}");
+                $out->append("<span class=\"lamp-only when\" role=\"img\" aria-label=\"{$label}\" title=\"{$label}\"></span>");
+            }
+            return;
+        }
+        if ($valid == 'always') {
+            $out->append('<span class="pill"><span class="lamp"></span>Always valid</span>');
+            return;
+        }
+        $out->append('<span class="pill when"><span class="lamp"></span>Only when <code>');
+        Html::escapeInto($valid, $out);
+        $out->append('</code></span>');
+    }
+
+    /**
+     * The declaration as code: a dark block in a full entry, a bare line in a compact row.
+     */
+    private static function signature(ApiMember $m, json::Value $decl, Links $links, bool $inline, string& $out) : void
+    {
+        Spell $spell = Spell($links);
+        if ($inline) {
+            $out->append('<div class="sig inline">');
+        } else {
+            $out->append('<div class="sig surface">');
+        }
+        if ($m->kind == 'case') {
+            $spell->named($m->owner, $out);
+            $out->append('<span class="p">::</span><span class="f">');
+            Html::escapeInto($m->name, $out);
+            $out->append('</span>');
+            array<json::Value> $payload = Field::items($decl, 'payload');
+            if ($payload->empty() == false) {
+                $out->append('<span class="p">(</span>');
+                bool $first = true;
+                foreach ($payload as $p) {
+                    if ($first == false) {
+                        $out->append('<span class="p">,</span> ');
+                    }
+                    $spell->type(Field::get($p, 'type'), $out);
+                    $out->append(' <span class="v">$');
+                    Html::escapeInto(Field::text($p, 'name'), $out);
+                    $out->append('</span>');
+                    $first = false;
+                }
+                $out->append('<span class="p">)</span>');
+            }
+            string $value = Field::text($decl, 'value');
+            if ($value->empty() == false) {
+                $out->append(' <span class="p">=</span> <span class="s">');
+                Html::escapeInto("'{$value}'", $out);
+                $out->append('</span>');
+            }
+        } else if ($m->kind == 'field') {
+            if (Field::flag($decl, 'static', false)) {
+                $out->append('<span class="k">static</span> ');
+            }
+            $spell->type(Field::get($decl, 'type'), $out);
+            $out->append(' <span class="v">$');
+            Html::escapeInto($m->name, $out);
+            $out->append('</span>');
+            string $value = Field::text($decl, 'default_value');
+            if ($value->empty() == false) {
+                $out->append(' <span class="p">=</span> ');
+                Spell::code($value, $out);
+            }
+        } else if ($m->kind == 'constant') {
+            $out->append('<span class="k">const</span> ');
+            string $type = Field::text($decl, 'type');
+            if ($type->empty() == false) {
+                Spell::code($type, $out);
+                $out->append(' ');
+            }
+            $out->append('<span class="n">');
+            Html::escapeInto($m->name, $out);
+            $out->append('</span>');
+            string $value = Field::text($decl, 'value');
+            if ($value->empty() == false) {
+                $out->append(' <span class="p">=</span> ');
+                Spell::code($value, $out);
+            }
+        } else {
+            $spell->signature($decl, $out);
+        }
+        $out->append('</div>');
+    }
+
+    private static function row(ApiMember $m, const string& $scope, Links $links, string& $out) : void
+    {
+        string $anchor = Html::escape($m->anchor);
+        $out->append("<section class=\"compact\" id=\"{$anchor}\">");
+        ApiPages::head($m, $out, true);
+        ApiPages::validity($m, $out, true);
+        $out->append('</div>');
+        ApiPages::signature($m, $m->decls[0], $links, true, $out);
+        string $summary = ApiPages::markdown($m->doc->summary, $links, $scope, $m->url);
+        if ($summary->empty() == false) {
+            $out->append('<div class="member-doc">');
+            $out->append($summary);
+            $out->append('</div>');
+        }
+        $out->append('</section>');
+    }
+
+    private static function member(Reference $ref, ApiMember $m, const string& $scope, const Site& $site, Links $links, string& $out) : void
+    {
+        string $anchor = Html::escape($m->anchor);
+        $out->append("<section class=\"member\" id=\"{$anchor}\">");
+        ApiPages::head($m, $out, false);
+        ApiPages::validity($m, $out, false);
+        json::Value $first = $m->decls[0];
+        ApiPages::source($site, $first, 'member-src', $out);
+        $out->append('</div>');
+
+        string $summary = ApiPages::markdown($m->doc->summary, $links, $scope, $m->url);
+        if ($summary->empty() == false) {
+            $out->append('<div class="member-doc">');
+            $out->append($summary);
+            $out->append('</div>');
+        }
+
+        // one signature per overload; an overload with its own docblock says it under its signature
+        string $firstDoc = Field::text($m->decls[0], 'doc');
+        for (usize $i = 0; $i < $m->decls->count(); $i++) {
+            json::Value $decl = $m->decls[$i];
+            ApiPages::signature($m, $decl, $links, false, $out);
+            string $own = Field::text($decl, 'doc');
+            if ($i > 0 && $own->empty() == false && $own != $firstDoc) {
+                Docblock $d = Docblock::parse($own);
+                string $html = ApiPages::markdown($d->text, $links, $scope, $m->url);
+                $out->append('<div class="member-doc">');
+                $out->append($html);
+                $out->append('</div>');
+            }
+        }
+
+        json::Value $outcomes = Field::get($m->tools, 'outcomes');
+        if ($outcomes->isObject()) {
+            $out->append('<div class="outcomes"><div><span class="outcome-ok">');
+            string $okLabel = Field::text($outcomes, 'okLabel');
+            if ($okLabel->empty()) {
+                $okLabel = 'Holds a value';
+            }
+            Html::escapeInto($okLabel, $out);
+            $out->append('</span><span class="outcome-text">');
+            Html::escapeInto(Field::text($outcomes, 'ok'), $out);
+            $out->append('</span></div><div><span class="outcome-fail">');
+            string $failLabel = Field::text($outcomes, 'failLabel');
+            if ($failLabel->empty()) {
+                $failLabel = 'Holds a failure';
+            }
+            Html::escapeInto($failLabel, $out);
+            $out->append('</span><span class="outcome-text">');
+            Html::escapeInto(Field::text($outcomes, 'fail'), $out);
+            $out->append('</span></div></div>');
+        }
+
+        if ($m->doc->params->empty() == false || $m->doc->returns->empty() == false) {
+            $out->append('<div class="params">');
+            foreach ($m->doc->params as $p) {
+                $out->append('<div><span class="pname">');
+                Html::escapeInto($p->name, $out);
+                $out->append('</span><span class="pdoc">');
+                Inline $pi = Inline(Document(), $links);
+                $out->append($pi->render($p->text));
+                $out->append('</span></div>');
+            }
+            if ($m->doc->returns->empty() == false) {
+                $out->append('<div><span class="pname">returns</span><span class="pdoc">');
+                Inline $ri = Inline(Document(), $links);
+                $out->append($ri->render($m->doc->returns));
+                $out->append('</span></div>');
+            }
+            $out->append('</div>');
+        }
+
+        string $example = ApiPages::example($ref, $m->tools, $m->doc);
+        if (Field::has($m->tools, 'example') && $example->empty() == false) {
+            string $file = Path::base(Field::text($m->tools, 'example'));
+            CodeBlock::render("echo title=\"{$file}\"", $example, $out);
+        }
+        string $rest = ApiPages::markdown($m->doc->rest, $links, $scope, $m->url);
+        if ($rest->empty() == false) {
+            $out->append('<div class="member-doc doc">');
+            $out->append($rest);
+            $out->append('</div>');
+        }
+        $out->append('</section>');
+    }
+
+    // ------------------------------------------------------------------------ a namespace
+
+    /**
+     * The page of one namespace: the namespaces below it and its types as
+     * cards, then its free functions, operators, and constants as members.
+     *
+     * @param $ref The library this namespace belongs to.
+     * @param $ns The namespace to draw. `$links` uses it as the scope for symbols in docblocks.
+     * @param $site Title, version, base: the chrome around the page.
+     * @param $links Resolves type names in docblocks and `api:` links.
+     * @param $search This page adds itself here.
+     */
+    public static function space(Reference $ref, ApiNamespace $ns, const Site& $site, Links $links, SearchIndex& $search) : PageView
+    {
+        PageView $v = ApiPages::view($ns->url, $ns->title());
+        string $out = '';
+        $out->append('<section class="hero">');
+        $out->append(Wave::svg());
+        ApiPages::crumbs($ref, $links, Links::parent($ns->name), $ns->title(), $out);
+        $out->append('<div class="titlerow"><h1 class="h1 long">');
+        if ($ns->name->empty()) {
+            $out->append('Global');
+        } else {
+            Html::escapeInto($ns->name, $out);
+            $out->append('<span class="gen">::</span>');
+        }
+        $out->append('</h1><span class="badges"><span class="badge">namespace</span></span></div>');
+        ApiPages::meta($out, 'Types', "{$ns->types->count()}", 'Functions', "{$ns->functions->count()}", 'Constants', "{$ns->constants->count()}");
+        $out->append('</section>');
+
+        usize $n = 1;
+        if ($ns->children->empty() == false) {
+            ApiPages::divider($out, $n, 'namespaces', 'Namespaces');
+            $out->append('<div class="listing">');
+            foreach ($ns->children as $child) {
+                ApiPages::listingCard($out, $links, $child->url, 'namespace', $child->title(), $child->tally(), $child->name);
+            }
+            $out->append('</div>');
+            $v->toc->push(TocGroup('namespaces', 'Namespaces'));
+            $n = $n + 1;
+        }
+        if ($ns->types->empty() == false) {
+            ApiPages::divider($out, $n, 'types', 'Types');
+            ApiPages::cards($ref, $ns->types, $links, $out);
+            $v->toc->push(TocGroup('types', 'Types'));
+            $n = $n + 1;
+        }
+        if ($ns->functions->empty() == false) {
+            ApiPages::section($ref, $ns->name, 'Functions', 'functions', $n, $ns->functions, $site, $links, $search, $v, $out);
+            $n = $n + 1;
+        }
+        if ($ns->operators->empty() == false) {
+            ApiPages::section($ref, $ns->name, 'Operators', 'operators', $n, $ns->operators, $site, $links, $search, $v, $out);
+            $n = $n + 1;
+        }
+        if ($ns->constants->empty() == false) {
+            ApiPages::section($ref, $ns->name, 'Constants', 'constants', $n, $ns->constants, $site, $links, $search, $v, $out);
+            $n = $n + 1;
+        }
+        $v->main = $out;
+        $search->add($links->url($ns->url), $ns->title(), $ref->library, 'module', 'module', '', $ns->name);
+        return $v;
+    }
+}

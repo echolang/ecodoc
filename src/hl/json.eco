@@ -1,0 +1,74 @@
+/*
+ * Tokenizing JSON for the highlighter.
+ */
+
+namespace ecodoc::hl;
+
+use ecodoc::text::Ascii;
+use ecodoc::text::ch;
+
+/**
+ * JSON, with object keys told apart from string values. `//` comments and
+ * trailing commas are tolerated, the way docs actually write JSON.
+ */
+public struct JsonLexer
+{
+    /**
+     * Lex `$src` as JSON into `$out`. A string followed (past space) by
+     * `:` is a key; anything else in quotes is a value.
+     */
+    public static function run(const string& $src, Spans& $out) : void
+    {
+        usize $n = $src->size();
+        usize $i = 0;
+        while ($i < $n) {
+            uint8 $b = $src->byte($i);
+            if ($b == ch::QUOTE) {
+                usize $end = EchoLexer::stringEnd($src, $i, ch::QUOTE);
+                usize $k = $end;
+                while ($k < $n && Ascii::space($src->byte($k))) {
+                    $k = $k + 1;
+                }
+                if ($k < $n && $src->byte($k) == ch::COLON) {
+                    $out->add('t', $src->sub($i, $end - $i));
+                } else {
+                    $out->add('s', $src->sub($i, $end - $i));
+                }
+                $i = $end;
+                continue;
+            }
+            if ($b == ch::SLASH && $i + 1 < $n && $src->byte($i + 1) == ch::SLASH) {
+                usize $end = EchoLexer::lineEnd($src, $i);
+                $out->add('c', $src->sub($i, $end - $i));
+                $i = $end;
+                continue;
+            }
+            if (Ascii::digit($b) || $b == ch::DASH) {
+                usize $end = $i + 1;
+                while ($end < $n && (Ascii::digit($src->byte($end)) || $src->byte($end) == ch::DOT
+                    || $src->byte($end) == 101 || $src->byte($end) == 69 || $src->byte($end) == ch::PLUS || $src->byte($end) == ch::DASH)) {
+                    $end = $end + 1;
+                }
+                $out->add('n', $src->sub($i, $end - $i));
+                $i = $end;
+                continue;
+            }
+            if (Ascii::alpha($b)) {
+                usize $end = $i;
+                while ($end < $n && Ascii::alpha($src->byte($end))) {
+                    $end = $end + 1;
+                }
+                $out->add('k', $src->sub($i, $end - $i));
+                $i = $end;
+                continue;
+            }
+            if (Ascii::space($b)) {
+                $out->add('', $src->sub($i, 1));
+                $i = $i + 1;
+                continue;
+            }
+            $out->add('p', $src->sub($i, 1));
+            $i = $i + 1;
+        }
+    }
+}

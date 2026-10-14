@@ -1,0 +1,180 @@
+namespace ecodoc::site;
+
+use std::io;
+use ecodoc::config::Field;
+use ecodoc::md::{BlockKind, Document, FrontSplit, Frontmatter, Heading, Inline, Renderer};
+use ecodoc::sys::Path;
+use ecodoc::text::Html;
+
+/**
+ * The shape of a page, from `layout:` in its frontmatter.
+ */
+public enum PageLayout
+{
+    /**
+     * Sidebar, content and outline: the default.
+     */
+    case doc;
+
+    /**
+     * The landing page: a hero, feature cards, then the content. No sidebar.
+     */
+    case home;
+
+    /**
+     * Content only, full width.
+     */
+    case page;
+
+    /**
+     * The layout called `$name`. `home` and `page` are themselves;
+     * everything else, a typo included, is `.doc`, so a page always renders.
+     */
+    public static function named(const string& $name) : PageLayout
+    {
+        if ($name == 'home') {
+            return .home;
+        }
+        if ($name == 'page') {
+            return .page;
+        }
+        return .doc;
+    }
+}
+
+/**
+ * A Markdown page of the docs folder, from its source to the HTML of its
+ * content. The chrome around it (header, sidebar, outline) is `Layout`'s.
+ *
+ * A page lives in two steps. `read()` parses it, which is enough to know
+ * its URL. `render()` turns it into HTML, and that waits until every page
+ * has been read, so a link to a page later in the walk still resolves.
+ */
+public class Page
+{
+    /**
+     * The source path relative to the docs folder: `guide/intro.md`.
+     */
+    public string $rel = '';
+
+    /**
+     * The URL the page is served at, `/guide/intro/`, without the site's base.
+     */
+    public string $url = '';
+
+    /**
+     * The frontmatter as JSON. An empty object when there is none.
+     */
+    public json::Value $front = json::object();
+
+    /**
+     * The parsed blocks of the Markdown after the frontmatter.
+     */
+    public Document $doc = Document();
+
+    /**
+     * From `layout:`, or `.doc` when it is missing.
+     */
+    public PageLayout $layout = .doc;
+
+    /**
+     * From `title:`, else the first `#` heading, else the file name. Final after `render()`.
+     */
+    public string $title = '';
+
+    /**
+     * From `description:`, else the first paragraph as plain text, cut at
+     * 200 characters. Final after `render()`.
+     */
+    public string $description = '';
+
+    /**
+     * The rendered content. Empty until `render()` runs.
+     */
+    public string $html = '';
+
+    /**
+     * Every heading of the page, for the outline and the search index. Filled by `render()`.
+     */
+    public array<Heading> $headings = array<Heading>();
+
+    /**
+     * Read and parse `$rel` under `$docs`. Rendering waits until every page
+     * is known, because links between pages resolve against all of them.
+     */
+    public static function read(const string& $docs, const string& $rel) : result<Page, Failure>
+    {
+        string $path = Path::join($docs, $rel);
+        string $text = guard io::readfile($path) else {
+            return .error(.io($path));
+        };
+        FrontSplit $split = Frontmatter::split($text);
+        Page $p = Page();
+        $p->rel = $rel;
+        $p->url = Route::forPage($rel);
+        $p->front = $split->data;
+        $p->doc = Document::parse($split->body, $split->line);
+        $p->layout = PageLayout::named(Field::text($p->front, 'layout'));
+        $p->title = Field::text($p->front, 'title');
+        $p->description = Field::text($p->front, 'description');
+        return .ok($p);
+    }
+
+    /**
+     * Render the content against the site's links. The first `#` heading is
+     * the page title when the frontmatter names none; on a doc page it
+     * stays in the content, as written.
+     */
+    public function render(Links $links) : void
+    {
+        $links->page = $this->rel;
+        $links->scope = '';
+        Renderer $r = Renderer($links);
+        $this->html = $r->document($this->doc);
+        $this->headings = $r->headings;
+        if ($this->title->empty()) {
+            $this->title = $r->title;
+        }
+        if ($this->title->empty()) {
+            $this->title = str::ucfirst(Path::stem($this->rel));
+        }
+        if ($this->description->empty()) {
+            $this->description = Page::firstParagraph($this->doc, $links);
+        }
+    }
+
+    /**
+     * The plain text of the first paragraph, for a description that was never written.
+     */
+    private static function firstParagraph(const Document& $doc, Links $links) : string
+    {
+        foreach ($doc->blocks as $b) {
+            if ($b->kind == BlockKind::paragraph) {
+                Inline $inline = Inline($doc, $links);
+                return SearchIndex::clip(Html::text($inline->render($b->text)), 200);
+            }
+        }
+        return '';
+    }
+
+    /**
+     * Whether the page shows the "On this page" outline. Only doc pages do,
+     * and `outline: false` hides it.
+     */
+    public const function outline() : bool
+    {
+        return Field::flag($this->front, 'outline', true) && $this->layout == PageLayout::doc;
+    }
+
+    /**
+     * Whether the page shows the sidebar. On by default, except on the home
+     * page, where `sidebar: true` turns it on.
+     */
+    public const function sidebar() : bool
+    {
+        if ($this->layout == PageLayout::home) {
+            return Field::flag($this->front, 'sidebar', false);
+        }
+        return Field::flag($this->front, 'sidebar', true);
+    }
+}

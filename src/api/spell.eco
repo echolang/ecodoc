@@ -1,0 +1,492 @@
+/*
+ * Type trees and signatures from echoc's decls JSON, spelled back as Echo.
+ */
+
+namespace ecodoc::api;
+
+use ecodoc::config::Field;
+use ecodoc::hl::Highlight;
+use ecodoc::site::Links;
+use ecodoc::text::Html;
+
+/**
+ * Writes types and signatures. `$links` resolves a named type to its page.
+ *
+ * ```echo
+ * json::Value $of = json::object();
+ * $of['kind'] = json::str('string');
+ * json::Value $t = json::object();
+ * $t['kind'] = json::str('array');
+ * $t['of'] = $of;
+ * echo Spell::plain($t);  // array<string>
+ * ```
+ *
+ * echoc hands over every type as a tree. That is the point: `const json::Value&`
+ * arrives with its namespace resolved and its borrow spelled out, so the
+ * reference can link `Value` to its page instead of guessing what an alias
+ * meant. `Spell` turns the tree back into Echo, as plain text for search and
+ * titles or as highlighted HTML with links for the pages.
+ */
+public struct Spell
+{
+    /**
+     * The symbols a named type can link to.
+     */
+    public Links $links;
+
+    /**
+     * The widest a signature may be on one line, in characters. A longer one
+     * puts each parameter on its own line, the way Echo is written.
+     */
+    public usize $width = 60;
+
+    /**
+     * Append the highlighted HTML of type tree `$t` to `$out`. Named types
+     * link to their page when the type is documented.
+     */
+    public function type(const json::Value& $t, string& $out) : void
+    {
+        string $kind = Field::text($t, 'kind');
+        bool $const = Field::flag($t, 'const', false) && $kind != 'ptr';
+        if ($const) {
+            $out->append('<span class="k">const</span> ');
+        }
+        if ($kind == 'prim') {
+            $out->append('<span class="t">');
+            Html::escapeInto(Field::text($t, 'name'), $out);
+            $out->append('</span>');
+            return;
+        }
+        if ($kind == 'string') {
+            $out->append('<span class="t">string</span>');
+            return;
+        }
+        if ($kind == 'array') {
+            $out->append('<span class="t">array</span><span class="p">&lt;</span>');
+            $this->type(Field::get($t, 'of'), $out);
+            $out->append('<span class="p">&gt;</span>');
+            return;
+        }
+        if ($kind == 'map') {
+            $out->append('<span class="t">map</span><span class="p">&lt;</span>');
+            $this->type(Field::get($t, 'key'), $out);
+            $out->append('<span class="p">,</span> ');
+            $this->type(Field::get($t, 'value'), $out);
+            $out->append('<span class="p">&gt;</span>');
+            return;
+        }
+        if ($kind == 'optional') {
+            $this->type(Field::get($t, 'of'), $out);
+            $out->append('<span class="p">?</span>');
+            return;
+        }
+        if ($kind == 'ptr') {
+            json::Value $to = Field::get($t, 'to');
+            if (Field::flag($t, 'weak', false)) {
+                $out->append('<span class="t">weak</span><span class="p">&lt;</span>');
+                $this->type($to, $out);
+                $out->append('<span class="p">&gt;</span>');
+                return;
+            }
+            if (Field::flag($t, 'borrow', false)) {
+                $this->type($to, $out);
+                $out->append('<span class="p">&amp;</span>');
+                return;
+            }
+            if (Field::flag($t, 'const', false)) {
+                $out->append('<span class="k">const</span> ');
+            }
+            $out->append('<span class="t">ptr</span><span class="p">&lt;</span>');
+            $this->type($to, $out);
+            $out->append('<span class="p">&gt;</span>');
+            if (Field::flag($t, 'nullable', false)) {
+                $out->append('<span class="p">?</span>');
+            }
+            return;
+        }
+        if ($kind == 'function') {
+            if (Field::flag($t, 'extern', false)) {
+                $out->append('<span class="k">extern</span> ');
+            }
+            $out->append('<span class="t">function</span><span class="p">&lt;</span>');
+            $this->type(Field::get($t, 'return'), $out);
+            $out->append('<span class="p">(</span>');
+            bool $first = true;
+            foreach (Field::items($t, 'params') as $p) {
+                if ($first == false) {
+                    $out->append('<span class="p">,</span> ');
+                }
+                $this->type($p, $out);
+                $first = false;
+            }
+            $out->append('<span class="p">)&gt;</span>');
+            return;
+        }
+        // a named type, generic or not
+        string $name = Field::text($t, 'name');
+        $this->named($name, $out);
+        array<json::Value> $args = Field::items($t, 'args');
+        if ($args->empty() == false) {
+            $out->append('<span class="p">&lt;</span>');
+            bool $first = true;
+            foreach ($args as $a) {
+                if ($first == false) {
+                    $out->append('<span class="p">,</span> ');
+                }
+                $this->type($a, $out);
+                $first = false;
+            }
+            $out->append('<span class="p">&gt;</span>');
+        }
+    }
+
+    /**
+     * A type's name, linked to its page when the type is documented.
+     */
+    public function named(const string& $qualified, string& $out) : void
+    {
+        if ($this->links->symbols->has($qualified)) {
+            string $href = Html::escape($this->links->url($this->links->symbols->get($qualified)));
+            string $short = Html::escape(Links::lastSegment($qualified));
+            string $full = Html::escape($qualified);
+            $out->append("<a class=\"t\" href=\"{$href}\" title=\"{$full}\">{$short}</a>");
+            return;
+        }
+        $out->append('<span class="t">');
+        Html::escapeInto($qualified, $out);
+        $out->append('</span>');
+    }
+
+    /**
+     * A type as plain text, `array<json::Value>`.
+     */
+    public static function plain(const json::Value& $t) : string
+    {
+        string $kind = Field::text($t, 'kind');
+        string $prefix = '';
+        if (Field::flag($t, 'const', false) && $kind != 'ptr') {
+            $prefix = 'const ';
+        }
+        if ($kind == 'prim') {
+            string $prim = Field::text($t, 'name');
+            return "{$prefix}{$prim}";
+        }
+        string $body = '';
+        if ($kind == 'string') {
+            $body = 'string';
+        } else if ($kind == 'array') {
+            string $of = Spell::plain(Field::get($t, 'of'));
+            $body = "array<{$of}>";
+        } else if ($kind == 'map') {
+            string $k = Spell::plain(Field::get($t, 'key'));
+            string $v = Spell::plain(Field::get($t, 'value'));
+            $body = "map<{$k}, {$v}>";
+        } else if ($kind == 'optional') {
+            string $of = Spell::plain(Field::get($t, 'of'));
+            $body = "{$of}?";
+        } else if ($kind == 'ptr') {
+            string $to = Spell::plain(Field::get($t, 'to'));
+            if (Field::flag($t, 'weak', false)) {
+                $body = "weak<{$to}>";
+            } else if (Field::flag($t, 'borrow', false)) {
+                $body = "{$to}&";
+            } else {
+                $body = "ptr<{$to}>";
+            }
+        } else if ($kind == 'function') {
+            string $ret = Spell::plain(Field::get($t, 'return'));
+            array<string> $ps = array<string>();
+            foreach (Field::items($t, 'params') as $p) {
+                $ps->push(Spell::plain($p));
+            }
+            string $joined = str::join($ps, ', ');
+            $body = "function<{$ret}({$joined})>";
+        } else {
+            $body = Field::text($t, 'name');
+            array<json::Value> $args = Field::items($t, 'args');
+            if ($args->empty() == false) {
+                array<string> $as = array<string>();
+                foreach ($args as $a) {
+                    $as->push(Spell::plain($a));
+                }
+                string $joined = str::join($as, ', ');
+                $body = "{$body}<{$joined}>";
+            }
+        }
+        return "{$prefix}{$body}";
+    }
+
+    /**
+     * The qualified name a type tree is about, through borrows, pointers, and
+     * optionals: `json::Value` for `const json::Value&`.
+     */
+    public static function subject(const json::Value& $t) : string
+    {
+        string $kind = Field::text($t, 'kind');
+        if ($kind == 'ptr') {
+            return Spell::subject(Field::get($t, 'to'));
+        }
+        if ($kind == 'optional') {
+            return Spell::subject(Field::get($t, 'of'));
+        }
+        if ($kind == 'named') {
+            return Field::text($t, 'name');
+        }
+        return '';
+    }
+
+    /**
+     * `<T, E : numeric>` from a generics list. Empty when there are none.
+     */
+    public static function generics(const json::Value& $decl) : string
+    {
+        array<json::Value> $gs = Field::items($decl, 'generics');
+        if ($gs->empty()) {
+            return '';
+        }
+        array<string> $parts = array<string>();
+        foreach ($gs as $g) {
+            string $name = Field::text($g, 'name');
+            string $constraint = Field::text($g, 'constraint');
+            if ($constraint->empty()) {
+                $parts->push($name);
+            } else {
+                $parts->push("{$name} : {$constraint}");
+            }
+        }
+        string $joined = str::join($parts, ', ');
+        return "<{$joined}>";
+    }
+
+    /**
+     * Append the highlighted `<T, E : numeric>` of `$decl` to `$out`, or
+     * nothing when it has no generics.
+     */
+    public function genericsHtml(const json::Value& $decl, string& $out) : void
+    {
+        array<json::Value> $gs = Field::items($decl, 'generics');
+        if ($gs->empty()) {
+            return;
+        }
+        $out->append('<span class="p">&lt;</span>');
+        bool $first = true;
+        foreach ($gs as $g) {
+            if ($first == false) {
+                $out->append('<span class="p">,</span> ');
+            }
+            $out->append('<span class="t">');
+            Html::escapeInto(Field::text($g, 'name'), $out);
+            $out->append('</span>');
+            string $constraint = Field::text($g, 'constraint');
+            if ($constraint->empty() == false) {
+                $out->append(' <span class="p">:</span> <span class="t">');
+                Html::escapeInto($constraint, $out);
+                $out->append('</span>');
+            }
+            $first = false;
+        }
+        $out->append('<span class="p">&gt;</span>');
+    }
+
+    /**
+     * One parameter: `label: inout int32& $x = 4`.
+     */
+    public function param(const json::Value& $p, string& $out) : void
+    {
+        string $label = Field::text($p, 'label');
+        if ($label->empty() == false) {
+            $out->append('<span class="f">');
+            Html::escapeInto($label, $out);
+            $out->append('</span><span class="p">:</span> ');
+        }
+        string $mode = Field::text($p, 'mode');
+        if ($mode->empty() == false && $mode != 'mv') {
+            $out->append('<span class="k">');
+            Html::escapeInto($mode, $out);
+            $out->append('</span> ');
+        }
+        if (Field::flag($p, 'move', false)) {
+            $out->append('<span class="k">mv</span> ');
+        }
+        $this->type(Field::get($p, 'type'), $out);
+        $out->append(' <span class="v">$');
+        Html::escapeInto(Field::text($p, 'name'), $out);
+        $out->append('</span>');
+        string $value = Field::text($p, 'default_value');
+        if ($value->empty() == false) {
+            $out->append(' <span class="p">=</span> ');
+            Spell::code($value, $out);
+        } else if (Field::flag($p, 'default', false)) {
+            $out->append(' <span class="p">= …</span>');
+        }
+    }
+
+    /**
+     * The parameter list: one line, or `$broken` over one line each.
+     */
+    public function params(const json::Value& $fn, bool $broken, string& $out) : void
+    {
+        array<json::Value> $ps = Field::items($fn, 'params');
+        $broken = $broken && $ps->empty() == false;
+        $out->append('<span class="p">(</span>');
+        bool $first = true;
+        foreach ($ps as $p) {
+            if ($first == false) {
+                $out->append('<span class="p">,</span>');
+                if ($broken == false) {
+                    $out->append(' ');
+                }
+            }
+            if ($broken) {
+                $out->append("\n    ");
+            }
+            $this->param($p, $out);
+            $first = false;
+        }
+        if ($broken) {
+            $out->append("\n");
+        }
+        $out->append('<span class="p">)</span>');
+    }
+
+    /**
+     * A snippet of Echo source, highlighted inline.
+     */
+    public static function code(const string& $source, string& $out) : void
+    {
+        array<string> $lines = Highlight::lines(.eco, $source);
+        $out->append(str::join($lines, "\n"));
+    }
+
+    /**
+     * The signature of a function or method as it is declared. Parameters
+     * break over lines when the signature is wider than `$width`.
+     */
+    public function signature(const json::Value& $fn, string& $out) : void
+    {
+        string $line = '';
+        $this->declaration($fn, false, $line);
+        if (Html::text($line)->size() <= $this->width) {
+            $out->append($line);
+            return;
+        }
+        $this->declaration($fn, true, $out);
+    }
+
+    private function declaration(const json::Value& $fn, bool $broken, string& $out) : void
+    {
+        string $kind = Field::text($fn, 'kind');
+        string $name = Field::text($fn, 'name');
+        if ($kind == 'operator') {
+            $this->symbolic($fn, $out);
+            return;
+        }
+        if ($kind == 'constructor') {
+            $this->named(Field::text($fn, 'qualified'), $out);
+            $this->params($fn, $broken, $out);
+            return;
+        }
+        if ($kind == 'static') {
+            $out->append('<span class="k">static</span> ');
+        }
+        if (Field::flag($fn, 'const', false)) {
+            $out->append('<span class="k">const</span> ');
+        }
+        $out->append('<span class="k">function</span> <span class="f">');
+        Html::escapeInto($name, $out);
+        $out->append('</span>');
+        $this->genericsHtml($fn, $out);
+        $this->params($fn, $broken, $out);
+        $out->append(' <span class="p">:</span> ');
+        $this->type(Field::get($fn, 'return'), $out);
+    }
+
+    /**
+     * An operator's symbol without the `operator ` its declared name starts
+     * with: `+` for `operator +`.
+     */
+    public static function operatorSymbol(const string& $name) : string
+    {
+        if ($name->starts('operator ')) {
+            return $name->sub(9, $name->size() - 9);
+        }
+        return $name->clone();
+    }
+
+    /**
+     * `operator (A $a) + (B $b) : R`, `operator (V $obj)[usize $i] : V&`, and
+     * the prefix and write forms.
+     */
+    private function symbolic(const json::Value& $fn, string& $out) : void
+    {
+        string $sym = Spell::operatorSymbol(Field::text($fn, 'name'));
+        array<json::Value> $ps = Field::items($fn, 'params');
+        $out->append('<span class="k">operator</span> ');
+        if ($sym == '[]' && $ps->count() == 2) {
+            $this->paren($ps[0], $out);
+            $out->append('<span class="p">[</span>');
+            $this->param($ps[1], $out);
+            $out->append('<span class="p">]</span>');
+        } else if ($sym == '[]=' && $ps->count() == 3) {
+            $this->paren($ps[0], $out);
+            $out->append('<span class="p">[</span>');
+            $this->param($ps[1], $out);
+            $out->append('<span class="p">] =</span> ');
+            $this->paren($ps[2], $out);
+        } else if ($sym == '[]=' && $ps->count() == 2) {
+            $this->paren($ps[0], $out);
+            $out->append('<span class="p">[] =</span> ');
+            $this->paren($ps[1], $out);
+        } else if ($ps->count() == 2) {
+            $this->paren($ps[0], $out);
+            $out->append(' <span class="f">');
+            Html::escapeInto($sym, $out);
+            $out->append('</span> ');
+            $this->paren($ps[1], $out);
+        } else if ($ps->count() == 1) {
+            $out->append('<span class="f">');
+            Html::escapeInto($sym, $out);
+            $out->append('</span>');
+            $this->paren($ps[0], $out);
+        } else {
+            $out->append('<span class="f">');
+            Html::escapeInto($sym, $out);
+            $out->append('</span>');
+            $this->params($fn, false, $out);
+        }
+        $out->append(' <span class="p">:</span> ');
+        $this->type(Field::get($fn, 'return'), $out);
+    }
+
+    private function paren(const json::Value& $p, string& $out) : void
+    {
+        $out->append('<span class="p">(</span>');
+        $this->param($p, $out);
+        $out->append('<span class="p">)</span>');
+    }
+
+    /**
+     * A plain-text signature for search and titles: `unwrap() : T&`.
+     */
+    public static function brief(const json::Value& $fn) : string
+    {
+        array<string> $ps = array<string>();
+        foreach (Field::items($fn, 'params') as $p) {
+            string $t = Spell::plain(Field::get($p, 'type'));
+            string $label = Field::text($p, 'label');
+            string $n = Field::text($p, 'name');
+            string $one = '';
+            if ($label->empty() == false) {
+                $one->append("{$label}: ");
+            }
+            $one->append("{$t} ");
+            $one->append('$');
+            $one->append($n);
+            $ps->push($one);
+        }
+        string $joined = str::join($ps, ', ');
+        string $ret = Spell::plain(Field::get($fn, 'return'));
+        string $name = Field::text($fn, 'name');
+        return "{$name}({$joined}) : {$ret}";
+    }
+}

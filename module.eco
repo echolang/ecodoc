@@ -1,0 +1,23 @@
+/*
+ * Documentation sites for Echo libraries. A `docs/` folder (manifest plus
+ * Markdown) becomes a static site in `docs/dist/`, with an API reference from
+ * the library's own declarations when the manifest asks, and the theme baked into the binary.
+ */
+
+#[module: "ecodoc"]
+#[version: "0.1.0"] // x-release-please-version
+
+#[sources: "src/**/*.eco"]
+#[cc: sources "c/*.c"]
+
+#[requires: "echolang/libjson" { version: "^0.1", source: git "https://github.com/echolang/libjson" }]
+#[requires: "echolang/libhttp" { version: "^0.2.6", source: git "https://github.com/echolang/libhttp" }]
+#[requires: "echolang/libcommand" { version: "^0.1", source: git "https://github.com/echolang/libcommand" }]
+
+#[target: exe { name: "ecodoc", entry: "main.eco" }] {
+    #[sources: "main.eco"]
+}
+
+#[target: test] {
+    #[sources: "tests/*.eco"]
+}

@@ -1,0 +1,98 @@
+namespace ecodoc::site;
+
+use std::io;
+use ecodoc::sys::{Path, Sys, Walk};
+
+/**
+ * The output directory. ecodoc owns it: a build empties it first, so a page
+ * that was deleted from the docs does not linger. To make that safe it only
+ * empties a directory it created, marked by a `.ecodoc` file.
+ *
+ * ```echo
+ * Dist $out = Dist::open('docs/dist')
+ *     ->or(Dist());
+ * $out->write('index.html', '<h1>Hi</h1>');
+ * echo $out->written;  // 1
+ * ```
+ *
+ * Point `--out` at your home directory by accident and nothing happens: it
+ * is not empty and has no `.ecodoc` marker, so `open()` refuses it. I would
+ * rather fail the build than empty somebody's files.
+ */
+public class Dist
+{
+    /**
+     * The output directory, as handed to `open()`.
+     */
+    public string $root = '';
+
+    /**
+     * Claim `$root` as the output directory and empty it.
+     *
+     * A directory that does not exist is created. One that exists is only
+     * emptied when it holds the `.ecodoc` marker or nothing at all. Anything
+     * else is somebody's files, and that is an `.input` failure.
+     */
+    public static function open(const string& $root) : result<Dist, Failure>
+    {
+        string $marker = Path::join($root, '.ecodoc');
+        if (Sys::isDir($root)) {
+            if (Sys::isFile($marker) == false && Dist::emptyDir($root) == false) {
+                return .error(.input("{$root} exists and was not written by ecodoc; pick another --out or remove it"));
+            }
+            Sys::purge($root);
+        }
+        Sys::mkdirs($root);
+        guard io::writefile($marker, "written by ecodoc; the next build empties this directory\n") else {
+            return .error(.io($marker));
+        };
+        Dist $d = Dist();
+        $d->root = $root;
+        return .ok($d);
+    }
+
+    private static function emptyDir(const string& $dir) : bool
+    {
+        io::dir $entries = guard io::opendir($dir) else {
+            return false;
+        };
+        foreach ($entries as $e) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Write `$bytes` at `$rel` below the root, creating parent directories as needed.
+     */
+    public function write(const string& $rel, const string& $bytes) : status<Failure>
+    {
+        string $path = Path::join($this->root, $rel);
+        if (Sys::put($path, $bytes) == false) {
+            return .error(.io($path));
+        }
+        return .ok;
+    }
+
+    /**
+     * Copy every file below `$from` to `$prefix` below the root, skipping
+     * `.md`, `.eco` and `.ecodoc`: the files a docs build reads itself.
+     */
+    public function copyTree(const string& $from, const string& $prefix, const array<string>& $skip) : status<Failure>
+    {
+        if (Sys::isDir($from) == false) {
+            return .ok;
+        }
+        foreach (Walk::files($from, '', $skip) as $rel) {
+            if ($rel->ends('.md') || $rel->ends('.eco') || $rel == '.ecodoc') {
+                continue;
+            }
+            string $to = Path::join($prefix, $rel);
+            string $src = Path::join($from, $rel);
+            if (Sys::copy($src, Path::join($this->root, $to)) == false) {
+                return .error(.io($src));
+            }
+        }
+        return .ok;
+    }
+}

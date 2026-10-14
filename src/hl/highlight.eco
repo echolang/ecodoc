@@ -1,0 +1,162 @@
+/*
+ * Hand-written highlighting for the few languages Echo docs show.
+ */
+
+namespace ecodoc::hl;
+
+use ecodoc::text::Html;
+use ecodoc::text::ch;
+
+/**
+ * Highlighted lines being built.
+ */
+public struct Spans
+{
+    /**
+     * The finished lines, as HTML.
+     */
+    public array<string> $lines = array<string>();
+
+    /**
+     * The line being written. Not in `$lines` until a line break or `done()`.
+     */
+    public string $line = '';
+
+    /**
+     * Append `$text` as class `$kind` (plain when empty). Splits at line
+     * breaks so each span closes on its own line.
+     */
+    public function add(const string& $kind, const string& $text) : void
+    {
+        usize $from = 0;
+        for (usize $i = 0; $i <= $text->size(); $i++) {
+            if ($i < $text->size() && $text->byte($i) != ch::LF) {
+                continue;
+            }
+            if ($i > $from) {
+                string $part = $text->sub($from, $i - $from);
+                if ($kind->empty()) {
+                    Html::escapeInto($part, $this->line);
+                } else {
+                    $this->line->append("<span class=\"{$kind}\">");
+                    Html::escapeInto($part, $this->line);
+                    $this->line->append('</span>');
+                }
+            }
+            if ($i < $text->size()) {
+                $this->lines->push($this->line);
+                $this->line = '';
+            }
+            $from = $i + 1;
+        }
+    }
+
+    /**
+     * Close the last line and hand over all of them. The `Spans` is empty afterwards.
+     */
+    public function done() : array<string>
+    {
+        $this->lines->push($this->line);
+        $this->line = '';
+        return $this->lines;
+    }
+}
+
+/**
+ * The languages with a lexer, and `plain` for every other one.
+ */
+public enum Lang
+{
+    /**
+     * Echo, from an `echo` or `eco` fence.
+     */
+    case eco;
+
+    /**
+     * Shell commands and sessions.
+     */
+    case shell;
+
+    /**
+     * JSON, comments and trailing commas tolerated.
+     */
+    case json;
+
+    /**
+     * No highlighting, only escaping.
+     */
+    case plain;
+
+    /**
+     * The lexer for a fence's language name, case ignored.
+     *
+     * ```echo
+     * echo Lang::named('echo') == Lang::eco;    // true
+     * echo Lang::named('ZSH') == Lang::shell;   // true
+     * echo Lang::named('jsonc') == Lang::json;  // true
+     * echo Lang::named('text') == Lang::plain;  // true
+     * ```
+     *
+     * An unknown language is not an error. Its block is escaped and shown
+     * as it is, which beats a build that stops over a fence tag nobody taught it.
+     */
+    public static function named(const string& $name) : Lang
+    {
+        string $n = str::lower($name);
+        if ($n == 'echo' || $n == 'eco') {
+            return .eco;
+        }
+        if ($n == 'bash' || $n == 'sh' || $n == 'shell' || $n == 'zsh' || $n == 'console' || $n == 'shellscript') {
+            return .shell;
+        }
+        if ($n == 'json' || $n == 'jsonc' || $n == 'json5') {
+            return .json;
+        }
+        return .plain;
+    }
+}
+
+/**
+ * Syntax highlighting for code blocks, hand-written for the few languages
+ * Echo docs show: Echo itself, shell commands and JSON. Everything else is escaped and left plain.
+ *
+ * ```echo
+ * array<string> $lines = Highlight::lines(.eco, 'echo $n; // twice');
+ * // $lines[0] is
+ * // <span class="k">echo</span> <span class="v">$n</span><span class="p">;</span> <span class="c">// twice</span>
+ * ```
+ *
+ * The token classes are the design's: `k` keyword, `t` type, `v` variable,
+ * `s` string, `n` number, `c` comment, `f` function, `p` punctuation, and
+ * `a` for an attribute. Output is one HTML string per source line with
+ * every span closed on its own line, so a line can be wrapped, numbered or highlighted on its own.
+ *
+ * I wrote three small lexers in Echo for what Echo docs actually show.
+ * Nothing to install, no grammar build at docs time, and they run in the
+ * same process as everything else.
+ */
+public struct Highlight
+{
+    /**
+     * `$code` as highlighted lines.
+     */
+    public static function lines(Lang $lang, const string& $code) : array<string>
+    {
+        Spans $spans = Spans();
+        match ($lang) {
+            .eco => {
+                EchoLexer::run($code, $spans);
+            },
+            .shell => {
+                ShellLexer::run($code, $spans);
+            },
+            .json => {
+                JsonLexer::run($code, $spans);
+            },
+            .plain => {
+                $spans->add('', $code);
+            },
+        };
+        return $spans->done();
+    }
+}

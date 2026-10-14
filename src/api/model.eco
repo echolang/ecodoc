@@ -1,0 +1,324 @@
+/*
+ * Types, namespaces, and members as the reference stores them, each with a URL.
+ */
+
+namespace ecodoc::api;
+
+use ecodoc::md::Slugger;
+use ecodoc::site::Links;
+
+/**
+ * One documented member: a method, a case, a field, a function. Overloads
+ * share one member and one anchor, and show one signature each.
+ */
+public class ApiMember
+{
+    /**
+     * `case`, `constructor`, `static`, `const`, `method`, `operator`, `field`,
+     * `constant`, or `function`.
+     */
+    public string $kind = '';
+
+    /**
+     * The member's name as written, `unwrap`.
+     */
+    public string $name = '';
+
+    /**
+     * The id on its page: the slugged name, `op-2b` for `operator +`.
+     * When another member already took it, `-2` is appended, then `-3`.
+     */
+    public string $anchor = '';
+
+    /**
+     * The qualified type or namespace this member belongs to.
+     */
+    public string $owner = '';
+
+    /**
+     * The page URL with the anchor, `/api/json/Value/#get`.
+     */
+    public string $url = '';
+
+    /**
+     * The section it is listed under: from `#[docs::group:]`, or from what it
+     * is (`Queries`, `Methods`, ...).
+     */
+    public string $section = '';
+
+    /**
+     * Every overload, as echoc printed it. One for most members.
+     */
+    public array<json::Value> $decls = array<json::Value>();
+
+    /**
+     * The first overload's docblock that has one. Overloads share their docs,
+     * so writing it once is enough.
+     */
+    public Docblock $doc = Docblock();
+
+    /**
+     * The `#[docs::*]` attributes as plain JSON, keyed by name.
+     */
+    public json::Value $tools = json::object();
+
+    /**
+     * An enum case with a payload. It is called like a constructor, so it is
+     * listed and drawn like one.
+     */
+    public bool $payload = false;
+
+    /**
+     * The badge in front of the name, as the legend reads: `static`, `const`,
+     * `method`, and the rest.
+     */
+    public const function badge() : string
+    {
+        if ($this->kind == 'case' && $this->payload) {
+            return 'static';
+        }
+        if ($this->kind == 'constant') {
+            return 'const';
+        }
+        return $this->kind->clone();
+    }
+
+    /**
+     * The outline's letter for this member: `s`, `c`, `m`, `f`, `o`, `p`, or `k`.
+     */
+    public const function letter() : string
+    {
+        if ($this->kind == 'static' || $this->kind == 'constructor' || ($this->kind == 'case' && $this->payload)) {
+            return 's';
+        }
+        if ($this->kind == 'const') {
+            return 'c';
+        }
+        if ($this->kind == 'method') {
+            return 'm';
+        }
+        if ($this->kind == 'function') {
+            return 'f';
+        }
+        if ($this->kind == 'operator') {
+            return 'o';
+        }
+        if ($this->kind == 'field') {
+            return 'p';
+        }
+        return 'k';
+    }
+
+    /**
+     * The search index's kind chip: `fn`, `const`, or the badge.
+     */
+    public const function chip() : string
+    {
+        if ($this->kind == 'function') {
+            return 'fn';
+        }
+        if ($this->kind == 'constant') {
+            return 'const';
+        }
+        return $this->badge();
+    }
+
+    /**
+     * Whether it is drawn with a parameter list: everything except fields,
+     * constants, and plain enum cases.
+     */
+    public const function callable() : bool
+    {
+        return $this->kind != 'field' && $this->kind != 'constant' && ($this->kind != 'case' || $this->payload);
+    }
+}
+
+/**
+ * One documented type: a struct, class, enum, or interface, with its members and a page of its own.
+ */
+public class ApiType
+{
+    /**
+     * The declaration as echoc printed it.
+     */
+    public json::Value $decl = json::object();
+
+    /**
+     * The qualified name, `json::Value`.
+     */
+    public string $qualified = '';
+
+    /**
+     * The last segment, `Value`.
+     */
+    public string $name = '';
+
+    /**
+     * The namespace, `json`. Empty for the global namespace.
+     */
+    public string $ns = '';
+
+    /**
+     * `struct`, `class`, `enum`, `interface`, or `opaque`.
+     */
+    public string $kind = '';
+
+    /**
+     * The page, `/api/json/Value/`.
+     */
+    public string $url = '';
+
+    /**
+     * The type's own docblock.
+     */
+    public Docblock $doc = Docblock();
+
+    /**
+     * The `#[docs::*]` attributes as plain JSON, keyed by name.
+     */
+    public json::Value $tools = json::object();
+
+    /**
+     * Every member, in source order. `$section` on each says where it is listed.
+     */
+    public array<ApiMember> $members = array<ApiMember>();
+
+    /**
+     * Free functions whose first parameter is this type, like a `str::from`
+     * hook. They live in their namespace and show up here too.
+     */
+    public array<ApiMember> $extensions = array<ApiMember>();
+
+    /**
+     * The name with its type parameters, `result<T, E>`.
+     */
+    public const function title() : string
+    {
+        string $generics = Spell::generics($this->decl);
+        return "{$this->name}{$generics}";
+    }
+
+}
+
+/**
+ * One namespace of the library, with what it declares directly.
+ */
+public class ApiNamespace
+{
+    /**
+     * The qualified name. Empty for the global namespace.
+     */
+    public string $name = '';
+
+    /**
+     * The page, `/api/json/`. A namespace with nothing but one type gets no
+     * page: the type's page is enough.
+     */
+    public string $url = '';
+
+    /**
+     * The types declared directly in this namespace.
+     */
+    public array<ApiType> $types = array<ApiType>();
+
+    /**
+     * Free functions declared in this namespace.
+     */
+    public array<ApiMember> $functions = array<ApiMember>();
+
+    /**
+     * Free operators declared in this namespace.
+     */
+    public array<ApiMember> $operators = array<ApiMember>();
+
+    /**
+     * Constants declared in this namespace.
+     */
+    public array<ApiMember> $constants = array<ApiMember>();
+
+    /**
+     * The namespaces one level down, `json::detail` under `json`, sorted by
+     * name. The reference fills in a namespace for every prefix, so a branch
+     * with nothing declared in it still holds its children.
+     */
+    public array<ApiNamespace> $children = array<ApiNamespace>();
+
+    /**
+     * `json::`, or `Global` for the global namespace.
+     */
+    public const function title() : string
+    {
+        if ($this->name->empty()) {
+            return 'Global';
+        }
+        return "{$this->name}::";
+    }
+
+    /**
+     * Whether it sits at the top of the tree, with no namespace above it.
+     */
+    public const function top() : bool
+    {
+        return Links::parent($this->name)->empty();
+    }
+
+    /**
+     * Its section id on the reference index: `json-detail` for `json::detail`,
+     * `global` for the global namespace.
+     */
+    public const function slug() : string
+    {
+        if ($this->name->empty()) {
+            return 'global';
+        }
+        return Slugger::of($this->name);
+    }
+
+    /**
+     * This namespace, then every one below it, depth first, onto `$out`.
+     */
+    public function flatten(array<ApiNamespace>& $out) : void
+    {
+        $out->push($this);
+        foreach ($this->children as $child) {
+            $child->flatten($out);
+        }
+    }
+
+    /**
+     * The title in the tree under its parent: `detail::` for `json::detail`.
+     */
+    public const function leaf() : string
+    {
+        if ($this->name->empty()) {
+            return 'Global';
+        }
+        string $last = Links::lastSegment($this->name);
+        return "{$last}::";
+    }
+
+    /**
+     * Whether it gets a page of its own: it declares functions, operators or
+     * constants, holds more than one type, or is part of a tree, with
+     * namespaces below it or one above. Only a top namespace holding a single
+     * type goes without: the type's page is enough.
+     */
+    public const function hasPage() : bool
+    {
+        return $this->functions->empty() == false || $this->constants->empty() == false || $this->operators->empty() == false || $this->types->count() >= 2
+            || $this->children->empty() == false || $this->top() == false;
+    }
+
+    /**
+     * What it holds, for its card: `12 declarations`, or `3 namespaces` for a
+     * branch that declares nothing itself.
+     */
+    public const function tally() : string
+    {
+        usize $count = $this->functions->count() + $this->types->count() + $this->constants->count() + $this->operators->count();
+        if ($count == 0 && $this->children->empty() == false) {
+            return "{$this->children->count()} namespaces";
+        }
+        return "{$count} declarations";
+    }
+}

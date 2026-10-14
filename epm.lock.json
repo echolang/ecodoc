@@ -1,0 +1,38 @@
+{
+  "lockVersion": 1,
+  "packages": [
+    {
+      "name": "echolang/libcommand",
+      "version": "0.1.3",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/echolang/libcommand"
+      },
+      "rev": "66cfafc150d27003883b0dc77463c2ccbbc2ab80",
+      "sha256": "ce492b34c286806505bdab0f5970eddfedc35796c5f7276ec50461470c2e554e",
+      "requires": []
+    },
+    {
+      "name": "echolang/libhttp",
+      "version": "0.2.6",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/echolang/libhttp"
+      },
+      "rev": "742521c3db5c2f155f037b0b7d4489ba76363360",
+      "sha256": "3763b33e8d804997d9d1935807942c90cb77e3a11b2ee6991707115da75debb5",
+      "requires": []
+    },
+    {
+      "name": "echolang/libjson",
+      "version": "0.1.2",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/echolang/libjson"
+      },
+      "rev": "85b04f7937f23bc18ff4ae9ba4d7700dacd9435e",
+      "sha256": "514d2c9f0c092e0ba172ff689593da9f22df3adcf4c702df74c51af78087e698",
+      "requires": []
+    }
+  ]
+}

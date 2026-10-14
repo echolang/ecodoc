@@ -1,0 +1,340 @@
+/*
+ * Tokenizing Echo source for the highlighter.
+ */
+
+namespace ecodoc::hl;
+
+use ecodoc::text::{Ascii, Lines};
+use ecodoc::text::ch;
+
+/**
+ * Echo, by this lexer's own vocabulary. Words are classified by what follows
+ * them as much as by what they are: `name(` is a call, `Name` and `name<` a
+ * type, `name::` a namespace.
+ */
+public struct EchoLexer
+{
+    /**
+     * Lex `$src` as Echo into `$out`.
+     *
+     * @param $src The code, any number of lines.
+     * @param $out Where the spans go. Call `done()` on it afterwards for the lines.
+     */
+    public static function run(const string& $src, Spans& $out) : void
+    {
+        usize $n = $src->size();
+        usize $i = 0;
+        while ($i < $n) {
+            uint8 $b = $src->byte($i);
+
+            if ($b == ch::SLASH && $i + 1 < $n && $src->byte($i + 1) == ch::SLASH) {
+                usize $end = EchoLexer::lineEnd($src, $i);
+                $out->add('c', $src->sub($i, $end - $i));
+                $i = $end;
+                continue;
+            }
+            if ($b == ch::SLASH && $i + 1 < $n && $src->byte($i + 1) == ch::STAR) {
+                usize $end = $src->find('*/', $i + 2);
+                if ($end >= $n) {
+                    $end = $n;
+                } else {
+                    $end = $end + 2;
+                }
+                $out->add('c', $src->sub($i, $end - $i));
+                $i = $end;
+                continue;
+            }
+            if ($b == ch::HASH && $i + 1 < $n && $src->byte($i + 1) == ch::LBRACKET) {
+                usize $end = EchoLexer::attributeEnd($src, $i);
+                $out->add('a', $src->sub($i, $end - $i));
+                $i = $end;
+                continue;
+            }
+            if ($b == ch::APOS) {
+                usize $end = EchoLexer::stringEnd($src, $i, ch::APOS);
+                $out->add('s', $src->sub($i, $end - $i));
+                $i = $end;
+                continue;
+            }
+            if ($b == ch::QUOTE) {
+                $i = EchoLexer::interpolated($src, $i, $out);
+                continue;
+            }
+            if ($b == ch::DOLLAR && $i + 1 < $n && Ascii::word($src->byte($i + 1))) {
+                usize $end = EchoLexer::wordEnd($src, $i + 1);
+                $out->add('v', $src->sub($i, $end - $i));
+                $i = $end;
+                continue;
+            }
+            if (Ascii::digit($b)) {
+                usize $end = EchoLexer::numberEnd($src, $i);
+                $out->add('n', $src->sub($i, $end - $i));
+                $i = $end;
+                continue;
+            }
+            if (Ascii::alpha($b) || $b == ch::UNDERSCORE) {
+                usize $end = EchoLexer::wordEnd($src, $i);
+                string $word = $src->sub($i, $end - $i);
+                $out->add(EchoLexer::classify($src, $i, $end, $word), $word);
+                $i = $end;
+                continue;
+            }
+            if (Ascii::space($b)) {
+                usize $end = $i;
+                while ($end < $n && Ascii::space($src->byte($end))) {
+                    $end = $end + 1;
+                }
+                $out->add('', $src->sub($i, $end - $i));
+                $i = $end;
+                continue;
+            }
+            usize $end = $i + 1;
+            while ($end < $n && EchoLexer::symbolic($src->byte($end))) {
+                $end = $end + 1;
+            }
+            if (EchoLexer::symbolic($b) == false) {
+                $end = $i + 1;
+            }
+            $out->add('p', $src->sub($i, $end - $i));
+            $i = $end;
+        }
+    }
+
+    private static function symbolic(uint8 $b) : bool
+    {
+        return $b == ch::DASH || $b == ch::GT || $b == ch::LT || $b == ch::EQ || $b == ch::BANG || $b == ch::PLUS
+            || $b == ch::STAR || $b == ch::PERCENT || $b == ch::AMP || $b == ch::PIPE || $b == ch::COLON
+            || $b == ch::QUESTION || $b == ch::DOT || $b == ch::CARET;
+    }
+
+    private static function classify(const string& $src, usize $start, usize $end, const string& $word) : string
+    {
+        // what the word is followed by, past spaces
+        usize $k = $end;
+        while ($k < $src->size() && $src->byte($k) == ch::SPACE) {
+            $k = $k + 1;
+        }
+        uint8 $next = 0;
+        if ($k < $src->size()) {
+            $next = $src->byte($k);
+        }
+        bool $call = $next == ch::LPAREN;
+        bool $generic = $end < $src->size() && $src->byte($end) == ch::LT;
+        bool $scope = Lines::at($src, $end, '::');
+
+        if (EchoLexer::keyword($word)) {
+            return 'k';
+        }
+        if (EchoLexer::contextual($word) && $call == false) {
+            return 'k';
+        }
+        if (EchoLexer::primitive($word)) {
+            return 't';
+        }
+        if ($generic && EchoLexer::lowerFirst($word)) {
+            return 't';
+        }
+        if ($call) {
+            return 'f';
+        }
+        if (Ascii::upper($word->byte(0))) {
+            if (EchoLexer::screaming($word)) {
+                return 'n';
+            }
+            return 't';
+        }
+        if ($scope) {
+            return 't';
+        }
+        return '';
+    }
+
+    /**
+     * Whether `$w` is an Echo keyword in every position: `function`, `guard` and the like.
+     */
+    public static function keyword(const string& $w) : bool
+    {
+        array<string> $words = [
+            'const', 'echo', 'function', 'return', 'if', 'else', 'guard', 'while', 'foreach', 'for', 'break',
+            'continue', 'namespace', 'use', 'null', 'struct', 'class', 'interface', 'enum', 'case', 'match',
+            'extern', 'as', 'destructor', 'instanceof', 'mv', 'unsafe', 'private', 'internal', 'public',
+            'operator', 'static', 'test', 'true', 'false', 'strong', 'constructor'
+        ];
+        foreach ($words as $k) {
+            if ($k == $w) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Words that are keywords in one position only. Followed by `(` they
+     * are a call to something with that name.
+     */
+    private static function contextual(const string& $w) : bool
+    {
+        return $w == 'init' || $w == 'read' || $w == 'inout' || $w == 'out' || $w == 'self' || $w == 'type'
+            || $w == 'where';
+    }
+
+    /**
+     * Whether `$w` is a built-in type name, `int32` or `bool` and the like.
+     * Drawn as types even without a capital letter.
+     */
+    public static function primitive(const string& $w) : bool
+    {
+        array<string> $types = [
+            'int8', 'int16', 'int32', 'int64', 'uint8', 'uint16', 'uint32', 'uint64', 'usize', 'isize',
+            'float32', 'float64', 'bool', 'void', 'int', 'uint', 'float', 'ptr', 'weak', 'string'
+        ];
+        foreach ($types as $t) {
+            if ($t == $w) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static function lowerFirst(const string& $w) : bool
+    {
+        return Ascii::lower($w->byte(0));
+    }
+
+    private static function screaming(const string& $w) : bool
+    {
+        if ($w->size() < 2) {
+            return false;
+        }
+        for (usize $k = 0; $k < $w->size(); $k++) {
+            uint8 $b = $w->byte($k);
+            if (Ascii::lower($b)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Where the line holding `$from` ends: at its `\n`, or at the end of `$src`.
+     */
+    public static function lineEnd(const string& $src, usize $from) : usize
+    {
+        usize $end = $src->find("\n", $from);
+        if ($end > $src->size()) {
+            return $src->size();
+        }
+        return $end;
+    }
+
+    private static function wordEnd(const string& $src, usize $from) : usize
+    {
+        usize $i = $from;
+        while ($i < $src->size() && Ascii::word($src->byte($i))) {
+            $i = $i + 1;
+        }
+        return $i;
+    }
+
+    private static function numberEnd(const string& $src, usize $from) : usize
+    {
+        usize $i = $from;
+        while ($i < $src->size()) {
+            uint8 $b = $src->byte($i);
+            if (Ascii::word($b)) {
+                $i = $i + 1;
+                continue;
+            }
+            // a decimal point, but not the first dot of `..`
+            if ($b == ch::DOT && $i + 1 < $src->size() && Ascii::digit($src->byte($i + 1))) {
+                $i = $i + 1;
+                continue;
+            }
+            break;
+        }
+        return $i;
+    }
+
+    /**
+     * Just past the closing `$quote` of the string opening at `$from`. A
+     * backslash escapes the byte after it. The end of `$src` when unclosed.
+     */
+    public static function stringEnd(const string& $src, usize $from, uint8 $quote) : usize
+    {
+        usize $i = $from + 1;
+        while ($i < $src->size()) {
+            uint8 $b = $src->byte($i);
+            if ($b == ch::BACKSLASH) {
+                $i = $i + 2;
+                continue;
+            }
+            if ($b == $quote) {
+                return $i + 1;
+            }
+            $i = $i + 1;
+        }
+        return $src->size();
+    }
+
+    private static function attributeEnd(const string& $src, usize $from) : usize
+    {
+        int32 $depth = 0;
+        usize $i = $from + 1;
+        while ($i < $src->size()) {
+            uint8 $b = $src->byte($i);
+            if ($b == ch::QUOTE) {
+                $i = EchoLexer::stringEnd($src, $i, ch::QUOTE);
+                continue;
+            }
+            if ($b == ch::LBRACKET) {
+                $depth = $depth + 1;
+            } else if ($b == ch::RBRACKET) {
+                $depth = $depth - 1;
+                if ($depth == 0) {
+                    return $i + 1;
+                }
+            } else if ($b == ch::LF) {
+                return $i;
+            }
+            $i = $i + 1;
+        }
+        return $src->size();
+    }
+
+    /**
+     * A `"` string, with its `{$...}` holes shown as code.
+     */
+    private static function interpolated(const string& $src, usize $from, Spans& $out) : usize
+    {
+        usize $end = EchoLexer::stringEnd($src, $from, ch::QUOTE);
+        usize $i = $from;
+        usize $text = $from;
+        while ($i < $end) {
+            uint8 $b = $src->byte($i);
+            if ($b == ch::BACKSLASH) {
+                $i = $i + 2;
+                continue;
+            }
+            if ($b == ch::LBRACE && $i + 1 < $end && $src->byte($i + 1) == ch::DOLLAR) {
+                usize $close = $src->find('}', $i);
+                if ($close >= $end) {
+                    break;
+                }
+                if ($i > $text) {
+                    $out->add('s', $src->sub($text, $i - $text));
+                }
+                $out->add('p', '{');
+                $out->add('v', $src->sub($i + 1, $close - $i - 1));
+                $out->add('p', '}');
+                $i = $close + 1;
+                $text = $i;
+                continue;
+            }
+            $i = $i + 1;
+        }
+        if ($end > $text) {
+            $out->add('s', $src->sub($text, $end - $text));
+        }
+        return $end;
+    }
+}

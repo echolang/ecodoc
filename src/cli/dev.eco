@@ -1,0 +1,139 @@
+namespace ecodoc::cli;
+
+use std::io;
+use std::thread;
+use std::time;
+use ecodoc::sys::{Path, Walk};
+
+/**
+ * What the watcher thread and the server share: one counter.
+ */
+#[atomic]
+public class DevState
+{
+    /**
+     * Bumped after every good rebuild. Open pages poll it through
+     * `/__ecodoc/version` and reload when the number moves.
+     */
+    public atomic<int32> $version = atomic<int32>(0);
+}
+
+/**
+ * `ecodoc dev`: build once, serve the output, rebuild when anything the site
+ * is made of changes, and reload open pages after a good build.
+ *
+ * Watching is polling. A thread sums the modification times of the docs
+ * folder (the output excluded) and, for an API reference, of the library's
+ * sources, a few times a second; a different sum is a rebuild. Pages get a
+ * few lines of script that poll `/__ecodoc/version` and reload when it moves.
+ * A failed build leaves the version alone, so the page keeps showing the last
+ * good site while the terminal shows what went wrong.
+ *
+ * Polling sounds cheap and dirty, and it is cheap. A docs folder is a few
+ * hundred files, and stat-ing them three times a second costs nothing next
+ * to the build it triggers. I skipped fsevents and inotify: no platform code.
+ */
+public struct Dev
+{
+    /**
+     * Build, serve and watch until the process is stopped.
+     *
+     * The first build can fail and `dev` still starts: you get the error in
+     * the terminal, fix the page, save, and the next build is the first page you see.
+     *
+     * @param $first The builder the command line set up. It runs the first build; every rebuild runs a `fresh()` copy of it.
+     * @param $port Listens on `127.0.0.1` only.
+     * @return Only on a failure: the watcher did not start, or the port was taken. A running server does not return.
+     */
+    public static function run(Builder $first, int32 $port) : status<Failure>
+    {
+        DevState $state = DevState();
+        string $docs = $first->docs;
+        string $out = $first->target();
+        Builder $options = $first->fresh();
+        string $hint = ' (fix it and save, dev keeps watching)';
+
+        $first->report($hint);
+        string $library = Dev::libraryRoot($first);
+
+        thread::handle $watcher = guard thread::spawn(function[$state, $options, $hint, $docs, $out, $library]() : void {
+            int64 $seen = Dev::fingerprint($docs, $out, $library);
+            while (true) {
+                time::sleep(time::duration::millis(350));
+                int64 $now = Dev::fingerprint($docs, $out, $library);
+                if ($now == $seen) {
+                    continue;
+                }
+                $seen = $now;
+                if ($options->fresh()->report($hint)) {
+                    $state->version->add(1);
+                }
+            }
+        }) else ($e) {
+            return .error(.input("could not start the watcher: {$e->message()}"));
+        };
+
+        http::Server $app = http::Server();
+        $app->get('/__ecodoc/version', function(http::Request $req) : http::Response {
+            int32 $v = $state->version->load();
+            http::Response $r = http::Response(text: "{$v}");
+            $r->header('Cache-Control', 'no-store');
+            return $r;
+        });
+        $app->get('/{path*}', function(http::Request $req) : http::Response {
+            return Serve::file($out, $req->param('path') ?? '', true);
+        });
+
+        io::println("ecodoc: serving http://localhost:{$port}/ (ctrl-c stops)");
+        guard $app->listen('127.0.0.1', $port) else ($e) {
+            return .error(.input("could not listen on port {$port}: {$e}"));
+        };
+        return .ok;
+    }
+
+    /**
+     * The directory of the library's manifest, when the site documents one.
+     * Empty otherwise, and the watcher skips it.
+     */
+    private static function libraryRoot(const Builder& $b) : string
+    {
+        if ($b->site->api->enabled == false) {
+            return '';
+        }
+        return Path::dir(Path::normalize(Path::join($b->docs, $b->site->api->manifest)));
+    }
+
+    /**
+     * `$html` with the reload poller slipped in just before `</body>`.
+     * Appended at the end when there is no `</body>`.
+     */
+    public static function inject(const string& $html) : string
+    {
+        string $script = '<script type="module">let v=null;setInterval(async()=>{try{const t=await (await fetch("/__ecodoc/version",{cache:"no-store"})).text();if(v!==null&&t!==v)location.reload();v=t}catch(e){}},500);</script>';
+        usize $at = $html->find('</body>');
+        string $out = '';
+        if ($at >= $html->size()) {
+            $out->append($html);
+            $out->append($script);
+            return $out;
+        }
+        $out->append($html->sub(0, $at));
+        $out->append($script);
+        $out->append($html->sub($at, $html->size() - $at));
+        return $out;
+    }
+
+    /**
+     * A number that changes when any watched file changes.
+     */
+    public static function fingerprint(const string& $docs, const string& $out, const string& $library) : int64
+    {
+        array<string> $skip = Walk::ignored();
+        $skip->push(Path::base($out));
+        int64 $sum = Walk::stamp($docs, '', $skip);
+        if ($library->empty() == false) {
+            $sum = $sum * 31 + Walk::stamp($library, '.eco', $skip);
+        }
+        return $sum;
+    }
+}

@@ -1,0 +1,701 @@
+/*
+ * Inline Markdown of one block: emphasis, links, code spans, autolinks.
+ * Block structure lives in `block.eco`.
+ */
+
+namespace ecodoc::md;
+
+use ecodoc::site::Links;
+use ecodoc::text::{Ascii, Html, Lines};
+use ecodoc::text::ch;
+
+/**
+ * One piece of a block's output: finished HTML, or a delimiter run still
+ * waiting to be paired with its opposite.
+ */
+internal struct Piece
+{
+    public bool $delim = false;
+    public string $html = '';
+    public uint8 $ch = 0;
+    public int32 $count = 0;
+    public int32 $length = 0;
+    public bool $opener = false;
+    public bool $closer = false;
+    public bool $active = true;
+
+    /**
+     * Tags opened at this run, innermost first.
+     */
+    public array<string> $opens = array<string>();
+
+    /**
+     * Tags closed at this run, innermost first.
+     */
+    public array<string> $closes = array<string>();
+}
+
+/**
+ * Where a link's destination ended, and what it said.
+ */
+internal struct LinkTail
+{
+    public bool $found = false;
+    public string $href = '';
+    public string $title = '';
+    public usize $end = 0;
+}
+
+/**
+ * Markdown, the inline half: the text of one block into HTML.
+ *
+ * ```echo
+ * Inline $in = Inline(Document(), Links());
+ * $in->render('Plain *em* and ~~gone~~');
+ * // Plain <em>em</em> and <del>gone</del>
+ * $in->render('see [the guide](/guide/)');
+ * // see <a href="/guide/">the guide</a>
+ * ```
+ *
+ * I do two passes, as CommonMark describes them. The first scans left to
+ * right and settles everything that is unambiguous on sight (escapes, code
+ * spans, links, autolinks, raw HTML, entities, line breaks) into finished
+ * HTML, leaving runs of `*`, `_` and `~` as delimiters. The second pairs
+ * the delimiters into emphasis, strong emphasis and strikethrough, inside out.
+ *
+ * One pass is not enough: `*a **b** c*` cannot be settled while reading it.
+ * Whether a `*` opens or closes depends on what comes later, so the first
+ * pass only notes the runs and the second pairs them once everything is known.
+ */
+public struct Inline
+{
+    /**
+     * The document this text belongs to, for its `[label]: url` references.
+     */
+    public Document $doc;
+
+    /**
+     * Resolves link destinations: page paths, `api:` symbols, the site base.
+     */
+    public Links $links;
+
+    /**
+     * The HTML of `$src`, the inline text of one block.
+     */
+    public function render(const string& $src) : string
+    {
+        array<Piece> $pieces = array<Piece>();
+        string $buf = '';
+        usize $n = $src->size();
+        usize $i = 0;
+
+        while ($i < $n) {
+            uint8 $b = $src->byte($i);
+
+            if ($b == ch::BACKSLASH && $i + 1 < $n) {
+                uint8 $next = $src->byte($i + 1);
+                if ($next == ch::LF) {
+                    $buf->append("<br>\n");
+                    $i = $i + 2;
+                    continue;
+                }
+                if (Ascii::punct($next)) {
+                    Html::escapeByte($next, $buf);
+                    $i = $i + 2;
+                    continue;
+                }
+            }
+
+            if ($b == ch::BACKTICK) {
+                usize $run = Lines::run($src, $i, ch::BACKTICK);
+                usize $close = Inline::closingTicks($src, $i + $run, $run);
+                if ($close < $n) {
+                    string $content = $src->sub($i + $run, $close - $i - $run);
+                    $buf->append($this->links->code(Inline::codeContent($content)));
+                    $i = $close + $run;
+                    continue;
+                }
+                $buf->append($src->sub($i, $run));
+                $i = $i + $run;
+                continue;
+            }
+
+            if ($b == ch::STAR || $b == ch::UNDERSCORE || $b == ch::TILDE) {
+                usize $run = Lines::run($src, $i, $b);
+                if ($b == ch::TILDE && $run > 2) {
+                    $buf->append($src->sub($i, $run));
+                    $i = $i + $run;
+                    continue;
+                }
+                Inline::flushText($buf, $pieces);
+                $pieces->push(Inline::delimiter($src, $i, $run, $b));
+                $i = $i + $run;
+                continue;
+            }
+
+            if ($b == ch::BANG && $i + 1 < $n && $src->byte($i + 1) == ch::LBRACKET) {
+                usize $used = $this->link($src, $i + 1, true, $buf);
+                if ($used > 0) {
+                    $i = $i + 1 + $used;
+                    continue;
+                }
+                $buf->append('!');
+                $i = $i + 1;
+                continue;
+            }
+
+            if ($b == ch::LBRACKET) {
+                usize $used = $this->link($src, $i, false, $buf);
+                if ($used > 0) {
+                    $i = $i + $used;
+                    continue;
+                }
+                $buf->append('[');
+                $i = $i + 1;
+                continue;
+            }
+
+            if ($b == ch::LT) {
+                usize $used = $this->angle($src, $i, $buf);
+                if ($used > 0) {
+                    $i = $i + $used;
+                    continue;
+                }
+                $buf->append('&lt;');
+                $i = $i + 1;
+                continue;
+            }
+
+            if ($b == ch::AMP) {
+                usize $entity = Inline::entityLength($src, $i);
+                if ($entity > 0) {
+                    $buf->append($src->sub($i, $entity));
+                    $i = $i + $entity;
+                    continue;
+                }
+                $buf->append('&amp;');
+                $i = $i + 1;
+                continue;
+            }
+
+            if ($b == ch::LF) {
+                usize $spaces = 0;
+                while ($buf->size() > 0 && $buf->byte($buf->size() - 1) == ch::SPACE) {
+                    $buf = $buf->sub(0, $buf->size() - 1);
+                    $spaces = $spaces + 1;
+                }
+                if ($spaces >= 2) {
+                    $buf->append("<br>\n");
+                } else {
+                    $buf->append("\n");
+                }
+                $i = $i + 1;
+                while ($i < $n && $src->byte($i) == ch::SPACE) {
+                    $i = $i + 1;
+                }
+                continue;
+            }
+
+            // a bare https:// URL becomes a link
+            if ($b == 104 && Inline::bareUrlAt($src, $i)) {
+                usize $end = Inline::bareUrlEnd($src, $i);
+                string $url = $src->sub($i, $end - $i);
+                string $safe = Html::escape($url);
+                $buf->append("<a href=\"{$safe}\" target=\"_blank\" rel=\"noreferrer\">{$safe}</a>");
+                $i = $end;
+                continue;
+            }
+
+            Html::escapeByte($b, $buf);
+            $i = $i + 1;
+        }
+
+        Inline::flushText($buf, $pieces);
+        Inline::pair($pieces);
+        return Inline::join($pieces);
+    }
+
+    private static function flushText(string& $buf, array<Piece>& $pieces) : void
+    {
+        if ($buf->empty()) {
+            return;
+        }
+        Piece $p = Piece();
+        $p->html = $buf->clone();
+        $pieces->push($p);
+        $buf = '';
+    }
+
+    /**
+     * The index of a run of exactly `$run` backticks at or after `$from`,
+     * or the size of `$src` when the span never closes.
+     */
+    private static function closingTicks(const string& $src, usize $from, usize $run) : usize
+    {
+        usize $i = $from;
+        while ($i < $src->size()) {
+            if ($src->byte($i) == ch::BACKTICK) {
+                usize $r = Lines::run($src, $i, ch::BACKTICK);
+                if ($r == $run) {
+                    return $i;
+                }
+                $i = $i + $r;
+                continue;
+            }
+            $i = $i + 1;
+        }
+        return $src->size();
+    }
+
+    /**
+     * A code span's text: line endings become spaces, and one space on each
+     * side is dropped when both are there.
+     */
+    private static function codeContent(const string& $raw) : string
+    {
+        string $c = '';
+        for (usize $k = 0; $k < $raw->size(); $k++) {
+            uint8 $b = $raw->byte($k);
+            if ($b == ch::LF) {
+                $c->push(ch::SPACE);
+            } else {
+                $c->push($b);
+            }
+        }
+        if ($c->size() >= 2 && $c->starts(' ') && $c->ends(' ') && Lines::blank($c) == false) {
+            return $c->sub(1, $c->size() - 2);
+        }
+        return $c;
+    }
+
+    /**
+     * A delimiter run, tagged with what CommonMark's flanking rules allow.
+     */
+    private static function delimiter(const string& $src, usize $at, usize $run, uint8 $b) : Piece
+    {
+        uint8 $prev = ch::SPACE;
+        if ($at > 0) {
+            $prev = $src->byte($at - 1);
+        }
+        uint8 $next = ch::SPACE;
+        if ($at + $run < $src->size()) {
+            $next = $src->byte($at + $run);
+        }
+        bool $left = Ascii::space($next) == false && (Ascii::punct($next) == false || Ascii::space($prev) || Ascii::punct($prev));
+        bool $right = Ascii::space($prev) == false && (Ascii::punct($prev) == false || Ascii::space($next) || Ascii::punct($next));
+
+        Piece $p = Piece();
+        $p->delim = true;
+        $p->ch = $b;
+        $p->count = $run as int32;
+        $p->length = $run as int32;
+        if ($b == ch::UNDERSCORE) {
+            $p->opener = $left && ($right == false || Ascii::punct($prev));
+            $p->closer = $right && ($left == false || Ascii::punct($next));
+        } else {
+            $p->opener = $left;
+            $p->closer = $right;
+        }
+        return $p;
+    }
+
+    /**
+     * Pair delimiter runs into tags. Closers left to right, each with the nearest opener that fits.
+     */
+    private static function pair(array<Piece>& $pieces) : void
+    {
+        usize $count = $pieces->count();
+        for (usize $c = 0; $c < $count; $c++) {
+            if ($pieces[$c]->delim == false || $pieces[$c]->closer == false || $pieces[$c]->active == false) {
+                continue;
+            }
+            while ($pieces[$c]->count > 0) {
+                usize $found = $count;
+                usize $j = $c;
+                while ($j > 0) {
+                    $j = $j - 1;
+                    if (Inline::fits($pieces[$j], $pieces[$c])) {
+                        $found = $j;
+                        break;
+                    }
+                }
+                if ($found == $count) {
+                    break;
+                }
+
+                int32 $use = 1;
+                if ($pieces[$found]->count >= 2 && $pieces[$c]->count >= 2) {
+                    $use = 2;
+                }
+                string $tag = 'em';
+                if ($pieces[$c]->ch == ch::TILDE) {
+                    $tag = 'del';
+                    $use = $pieces[$c]->count;
+                } else if ($use == 2) {
+                    $tag = 'strong';
+                }
+                $pieces[$found]->count = $pieces[$found]->count - $use;
+                $pieces[$found]->opens->push($tag);
+                $pieces[$c]->count = $pieces[$c]->count - $use;
+                $pieces[$c]->closes->push($tag);
+
+                // what sat between the pair can no longer pair across it
+                for (usize $k = $found + 1; $k < $c; $k++) {
+                    if ($pieces[$k]->delim) {
+                        $pieces[$k]->active = false;
+                    }
+                }
+                if ($pieces[$found]->count == 0) {
+                    $pieces[$found]->active = false;
+                }
+            }
+            if ($pieces[$c]->count > 0 && $pieces[$c]->opener == false) {
+                $pieces[$c]->active = false;
+            }
+        }
+    }
+
+    /**
+     * Whether `$open` can be the opener for `$close`.
+     */
+    private static function fits(const Piece& $open, const Piece& $close) : bool
+    {
+        if ($open->delim == false || $open->active == false || $open->opener == false || $open->count == 0) {
+            return false;
+        }
+        if ($open->ch != $close->ch) {
+            return false;
+        }
+        if ($close->ch == ch::TILDE) {
+            return $open->count == $close->count;
+        }
+        // the rule of three: a run that can both open and close does not pair
+        // with one whose lengths add up to a multiple of three
+        if (($open->closer || $close->opener) && ($open->length + $close->length) % 3 == 0
+            && ($open->length % 3 != 0 || $close->length % 3 != 0)) {
+            return false;
+        }
+        return true;
+    }
+
+    private static function join(const array<Piece>& $pieces) : string
+    {
+        string $out = '';
+        for (usize $k = 0; $k < $pieces->count(); $k++) {
+            if ($pieces[$k]->delim == false) {
+                $out->append($pieces[$k]->html);
+                continue;
+            }
+            for (usize $t = 0; $t < $pieces[$k]->closes->count(); $t++) {
+                $out->append("</{$pieces[$k]->closes[$t]}>");
+            }
+            for (int32 $r = 0; $r < $pieces[$k]->count; $r++) {
+                $out->push($pieces[$k]->ch);
+            }
+            usize $o = $pieces[$k]->opens->count();
+            while ($o > 0) {
+                $o = $o - 1;
+                $out->append("<{$pieces[$k]->opens[$o]}>");
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * A link or image starting with the `[` at `$at`. HTML goes onto `$buf`.
+     * The bytes used, or 0 when it is not a link.
+     */
+    private function link(const string& $src, usize $at, bool $image, string& $buf) : usize
+    {
+        usize $close = Inline::closingBracket($src, $at);
+        if ($close >= $src->size()) {
+            return 0;
+        }
+        string $label = $src->sub($at + 1, $close - $at - 1);
+        LinkTail $tail = LinkTail();
+
+        if ($close + 1 < $src->size() && $src->byte($close + 1) == ch::LPAREN) {
+            $tail = Inline::destination($src, $close + 2);
+        }
+        if ($tail->found == false && $close + 1 < $src->size() && $src->byte($close + 1) == ch::LBRACKET) {
+            usize $refEnd = $src->find(']', $close + 2);
+            if ($refEnd < $src->size()) {
+                string $name = $src->sub($close + 2, $refEnd - $close - 2);
+                if ($name->empty()) {
+                    $name = $label->clone();
+                }
+                string $key = Document::label($name);
+                if ($this->doc->refs->has($key)) {
+                    LinkRef $ref = $this->doc->refs->get($key);
+                    $tail->found = true;
+                    $tail->href = $ref->href;
+                    $tail->title = $ref->title;
+                    $tail->end = $refEnd + 1;
+                }
+            }
+        }
+        if ($tail->found == false) {
+            string $key = Document::label($label);
+            if ($key->empty() || $this->doc->refs->has($key) == false) {
+                return 0;
+            }
+            LinkRef $ref = $this->doc->refs->get($key);
+            $tail->found = true;
+            $tail->href = $ref->href;
+            $tail->title = $ref->title;
+            $tail->end = $close + 1;
+        }
+
+        string $raw = str::trim($tail->href);
+        string $href = Html::escape($this->links->href($raw));
+        string $title = '';
+        if ($tail->title->empty() == false) {
+            string $t = Html::escape($tail->title);
+            $title = " title=\"{$t}\"";
+        }
+
+        if ($image) {
+            string $alt = Html::escape(Html::text($this->render($label)));
+            $buf->append("<img src=\"{$href}\" alt=\"{$alt}\"{$title} loading=\"lazy\">");
+            return $tail->end - $at;
+        }
+
+        string $inner = '';
+        if ($label->empty() && $raw->starts('api:')) {
+            string $name = Html::escape($this->links->label($raw->sub(4, $raw->size() - 4)));
+            $inner = "<code>{$name}</code>";
+        } else {
+            $inner = $this->render($label);
+        }
+        if ($href->empty()) {
+            $buf->append($inner);
+            return $tail->end - $at;
+        }
+        string $extra = '';
+        if (Links::external($raw)) {
+            $extra = ' target="_blank" rel="noreferrer"';
+        }
+        $buf->append("<a href=\"{$href}\"{$title}{$extra}>{$inner}</a>");
+        return $tail->end - $at;
+    }
+
+    /**
+     * The `]` matching the `[` at `$at`, skipping escapes, code spans and
+     * nested brackets. The size of `$src` when there is none.
+     */
+    private static function closingBracket(const string& $src, usize $at) : usize
+    {
+        int32 $depth = 0;
+        usize $i = $at;
+        while ($i < $src->size()) {
+            uint8 $b = $src->byte($i);
+            if ($b == ch::BACKSLASH) {
+                $i = $i + 2;
+                continue;
+            }
+            if ($b == ch::BACKTICK) {
+                usize $run = Lines::run($src, $i, ch::BACKTICK);
+                usize $end = Inline::closingTicks($src, $i + $run, $run);
+                if ($end < $src->size()) {
+                    $i = $end + $run;
+                    continue;
+                }
+                $i = $i + $run;
+                continue;
+            }
+            if ($b == ch::LBRACKET) {
+                $depth = $depth + 1;
+            } else if ($b == ch::RBRACKET) {
+                $depth = $depth - 1;
+                if ($depth == 0) {
+                    return $i;
+                }
+            }
+            $i = $i + 1;
+        }
+        return $src->size();
+    }
+
+    /**
+     * `(href "title")`, read from just after the `(`.
+     */
+    private static function destination(const string& $src, usize $from) : LinkTail
+    {
+        LinkTail $tail = LinkTail();
+        usize $n = $src->size();
+        usize $i = $from;
+        while ($i < $n && Ascii::space($src->byte($i))) {
+            $i = $i + 1;
+        }
+        string $href = '';
+        if ($i < $n && $src->byte($i) == ch::LT) {
+            usize $end = $src->find('>', $i);
+            if ($end >= $n) {
+                return $tail;
+            }
+            $href = $src->sub($i + 1, $end - $i - 1);
+            $i = $end + 1;
+        } else {
+            int32 $parens = 0;
+            usize $start = $i;
+            while ($i < $n) {
+                uint8 $b = $src->byte($i);
+                if (Ascii::space($b)) {
+                    break;
+                }
+                if ($b == ch::BACKSLASH && $i + 1 < $n) {
+                    $i = $i + 2;
+                    continue;
+                }
+                if ($b == ch::LPAREN) {
+                    $parens = $parens + 1;
+                } else if ($b == ch::RPAREN) {
+                    if ($parens == 0) {
+                        break;
+                    }
+                    $parens = $parens - 1;
+                }
+                $i = $i + 1;
+            }
+            $href = $src->sub($start, $i - $start);
+        }
+        while ($i < $n && Ascii::space($src->byte($i))) {
+            $i = $i + 1;
+        }
+        string $title = '';
+        if ($i < $n && ($src->byte($i) == ch::QUOTE || $src->byte($i) == ch::APOS || $src->byte($i) == ch::LPAREN)) {
+            uint8 $open = $src->byte($i);
+            uint8 $closeBy = $open;
+            if ($open == ch::LPAREN) {
+                $closeBy = ch::RPAREN;
+            }
+            usize $j = $i + 1;
+            while ($j < $n && $src->byte($j) != $closeBy) {
+                if ($src->byte($j) == ch::BACKSLASH) {
+                    $j = $j + 1;
+                }
+                $j = $j + 1;
+            }
+            if ($j >= $n) {
+                return $tail;
+            }
+            $title = $src->sub($i + 1, $j - $i - 1);
+            $i = $j + 1;
+            while ($i < $n && Ascii::space($src->byte($i))) {
+                $i = $i + 1;
+            }
+        }
+        if ($i >= $n || $src->byte($i) != ch::RPAREN) {
+            return $tail;
+        }
+        $tail->found = true;
+        $tail->href = $href;
+        $tail->title = $title;
+        $tail->end = $i + 1;
+        return $tail;
+    }
+
+    /**
+     * An autolink `<https://...>` or a raw inline tag at the `<` at `$at`.
+     */
+    private function angle(const string& $src, usize $at, string& $buf) : usize
+    {
+        usize $n = $src->size();
+        if (Lines::at($src, $at, '<!--')) {
+            usize $end = $src->find('-->', $at + 4);
+            if ($end < $n) {
+                $buf->append($src->sub($at, $end + 3 - $at));
+                return $end + 3 - $at;
+            }
+            return 0;
+        }
+
+        usize $gt = $src->find('>', $at);
+        if ($gt >= $n) {
+            return 0;
+        }
+        string $inside = $src->sub($at + 1, $gt - $at - 1);
+        if ($inside->empty() == false && $inside->contains(' ') == false && $inside->contains('<') == false) {
+            usize $colon = $inside->find(':');
+            if ($colon < $inside->size() && $colon >= 2 && Ascii::alpha($inside->byte(0))) {
+                string $safe = Html::escape($inside);
+                $buf->append("<a href=\"{$safe}\" target=\"_blank\" rel=\"noreferrer\">{$safe}</a>");
+                return $gt + 1 - $at;
+            }
+            if ($inside->contains('@') && $inside->contains('/') == false) {
+                string $safe = Html::escape($inside);
+                $buf->append("<a href=\"mailto:{$safe}\">{$safe}</a>");
+                return $gt + 1 - $at;
+            }
+        }
+
+        string $tag = Html::tagName($src->sub($at, $n - $at));
+        if ($tag->empty()) {
+            return 0;
+        }
+        // the end of the tag, outside any quoted attribute
+        usize $i = $at + 1;
+        uint8 $quote = 0;
+        while ($i < $n) {
+            uint8 $b = $src->byte($i);
+            if ($quote != 0) {
+                if ($b == $quote) {
+                    $quote = 0;
+                }
+            } else if ($b == ch::QUOTE || $b == ch::APOS) {
+                $quote = $b;
+            } else if ($b == ch::GT) {
+                $buf->append($src->sub($at, $i + 1 - $at));
+                return $i + 1 - $at;
+            }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+
+    /**
+     * The length of an entity reference (`&amp;`, `&#123;`) at `$at`, or 0 when there is none.
+     */
+    private static function entityLength(const string& $src, usize $at) : usize
+    {
+        usize $i = $at + 1;
+        if ($i < $src->size() && $src->byte($i) == ch::HASH) {
+            $i = $i + 1;
+        }
+        usize $start = $i;
+        while ($i < $src->size() && $i - $start < 32 && (Ascii::digit($src->byte($i)) || Ascii::upper($src->byte($i)) || Ascii::lower($src->byte($i)))) {
+            $i = $i + 1;
+        }
+        if ($i > $start && $i < $src->size() && $src->byte($i) == ch::SEMI) {
+            return $i + 1 - $at;
+        }
+        return 0;
+    }
+
+    private static function bareUrlAt(const string& $src, usize $at) : bool
+    {
+        if ($at > 0 && (Ascii::word($src->byte($at - 1)) || $src->byte($at - 1) == ch::SLASH)) {
+            return false;
+        }
+        return Lines::at($src, $at, 'https://') || Lines::at($src, $at, 'http://');
+    }
+
+    private static function bareUrlEnd(const string& $src, usize $at) : usize
+    {
+        usize $i = $at;
+        while ($i < $src->size() && Ascii::space($src->byte($i)) == false && $src->byte($i) != ch::LT) {
+            $i = $i + 1;
+        }
+        while ($i > $at) {
+            uint8 $last = $src->byte($i - 1);
+            if ($last == ch::DOT || $last == ch::COMMA || $last == ch::COLON || $last == ch::SEMI
+                || $last == ch::BANG || $last == ch::QUESTION || $last == ch::RPAREN || $last == ch::APOS
+                || $last == ch::QUOTE || $last == ch::STAR || $last == ch::UNDERSCORE) {
+                $i = $i - 1;
+                continue;
+            }
+            break;
+        }
+        return $i;
+    }
+}

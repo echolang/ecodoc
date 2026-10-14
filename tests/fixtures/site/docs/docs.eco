@@ -1,0 +1,15 @@
+// the fixture site ecodoc's own tests build
+
+#[module: "docs"]
+
+#[docs::title: "fixture"]
+#[docs::description: "A site that uses every Markdown feature ecodoc renders."]
+#[docs::version: "v0.1.0"]
+#[docs::repo: "https://github.com/echolang/ecodoc"]
+#[docs::edit: "https://github.com/echolang/ecodoc/edit/main/tests/fixtures/site/docs/{path}"]
+#[docs::nav: [{ text: "Guide", link: "/guide/" }, { text: "Echo", link: "https://echoc.dev" }]]
+#[docs::sidebar: [{ base: "/guide/", items: [
+    { text: "Introduction", items: [{ text: "Getting started", link: "/guide/" }, { text: "Markdown", link: "/guide/markdown" }] },
+    { text: "Reference", items: [{ text: "Code", link: "/guide/code" }] }
+] }]]
+#[docs::footer: { message: "Released under the MIT license.", copyright: "Copyright 2026" }]

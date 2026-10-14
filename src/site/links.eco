@@ -1,0 +1,345 @@
+namespace ecodoc::site;
+
+use ecodoc::sys::Path;
+use ecodoc::text::Html;
+
+/**
+ * Every href a page writes passes through here. A Markdown link to another
+ * page's `.md` file becomes that page's URL, `api:result::or` becomes the
+ * symbol's anchor, and a path to an image in the docs folder is rooted at
+ * the site's base. A destination that does not resolve becomes a warning,
+ * tagged with the page and line it was written on.
+ *
+ * ```echo
+ * Links $l = Links();
+ * $l->base = '/lib/';
+ * string $url = '/api/json/Value/';
+ * $l->symbol('json::Value', $url, 'Value');
+ * echo $l->url('/guide/');          // /lib/guide/
+ * echo $l->resolve('Value') ?? '';  // json::Value
+ * ```
+ *
+ * A short name resolves when exactly one symbol ends in it. With `$scope`
+ * set to `json::Value`, a bare `get()` means `json::Value::get` first,
+ * which is how a docblock can say `get()` and mean its own type's method.
+ *
+ * I keep one `Links` for the whole build. Pages and the API reference
+ * register everything first, then every page renders against the full set,
+ * so a guide page can link a symbol and a docblock can link a guide page.
+ * `--strict` turns the collected warnings into a failed build.
+ */
+public class Links
+{
+    /**
+     * The site's base path, `/` or `/libjson/`, prefixed to every URL the site writes.
+     */
+    public string $base = '/';
+
+    /**
+     * Source path relative to the docs folder, mapped to the page's URL.
+     */
+    public map<string, string> $pages = map<string, string>();
+
+    /**
+     * Qualified symbol name to its URL (with the anchor).
+     */
+    public map<string, string> $symbols = map<string, string>();
+
+    /**
+     * Qualified symbol name to the text a bare `[](api:x)` link shows.
+     */
+    public map<string, string> $labels = map<string, string>();
+
+    /**
+     * Unqualified name to the qualified names that end in it.
+     */
+    public map<string, array<string>> $short = map<string, array<string>>();
+
+    /**
+     * Whether inline code that names a symbol exactly becomes a link to it.
+     */
+    public bool $autolink = false;
+
+    /**
+     * The page being rendered, as its source path (`guide/intro.md`) or, for an API page, its URL.
+     */
+    public string $page = '';
+
+    /**
+     * The line the current block starts on, for warnings.
+     */
+    public int32 $line = 0;
+
+    /**
+     * For a docblock: the qualified type or namespace its relative symbol
+     * names are resolved against first.
+     */
+    public string $scope = '';
+
+    /**
+     * Everything that did not resolve, as `<page>:<line>: <message>`, each one once.
+     */
+    public array<string> $warnings = array<string>();
+
+    private map<string, bool> $warned = map<string, bool>();
+
+    /**
+     * `$url` (rooted at `/`) under the base.
+     */
+    public const function url(const string& $url) : string
+    {
+        if ($this->base == '/' || $url->starts('/') == false) {
+            return $url->clone();
+        }
+        return "{$this->base}{$url->sub(1, $url->size() - 1)}";
+    }
+
+    /**
+     * Record a warning at the current `$page` and `$line`. The same text
+     * twice is kept once, so a dead link in a loop doesn't flood the terminal.
+     */
+    public function warn(const string& $message) : void
+    {
+        string $w = "{$this->page}:{$this->line}: {$message}";
+        if ($this->warned->has($w)) {
+            return;
+        }
+        $this->warned[$w] = true;
+        $this->warnings->push($w);
+    }
+
+    /**
+     * Register a symbol under its qualified name, and under its last segment for short lookups.
+     */
+    public function symbol(const string& $qualified, const string& $url, const string& $label) : void
+    {
+        $this->symbols[$qualified] = $url;
+        $this->labels[$qualified] = $label;
+        string $last = Links::lastSegment($qualified);
+        if ($this->short->has($last) == false) {
+            $this->short[$last] = array<string>();
+        }
+        $this->short->at($last)->push($qualified);
+    }
+
+    /**
+     * The qualified name `$target` means: the scope's member first, then
+     * the scope's namespace, then the name as written, then a unique short name.
+     */
+    public const function resolve(const string& $target) : string?
+    {
+        string $t = $target->clone();
+        if ($t->ends('()')) {
+            $t = $t->sub(0, $t->size() - 2);
+        }
+        if ($this->scope->empty() == false) {
+            string $member = "{$this->scope}::{$t}";
+            if ($this->symbols->has($member)) {
+                return $member;
+            }
+            string $ns = Links::parent($this->scope);
+            while ($ns->empty() == false) {
+                string $sibling = "{$ns}::{$t}";
+                if ($this->symbols->has($sibling)) {
+                    return $sibling;
+                }
+                $ns = Links::parent($ns);
+            }
+        }
+        if ($this->symbols->has($t)) {
+            return $t;
+        }
+        if ($this->short->has($t)) {
+            array<string> $hits = $this->short->get($t);
+            if ($hits->count() == 1) {
+                return $hits[0];
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The URL for `api:<target>`. Null, and a warning, when it does not resolve.
+     */
+    public function api(const string& $target) : string?
+    {
+        string $q = guard $this->resolve($target) else {
+            $this->warn("unresolved symbol 'api:{$target}'");
+            return null;
+        };
+        return $this->url($this->symbols->get($q));
+    }
+
+    /**
+     * The text a bare `[](api:target)` shows. The target itself when it does not resolve.
+     */
+    public const function label(const string& $target) : string
+    {
+        string $q = guard $this->resolve($target) else {
+            return $target->clone();
+        };
+        if ($this->labels->has($q)) {
+            return $this->labels->get($q);
+        }
+        return $q;
+    }
+
+    /**
+     * The href to write for a destination as the current page wrote it.
+     * `api:` goes through `api()`, a `.md` path through `$pages`, a site
+     * path under the base. External URLs, hashes and `mailto:` stay as written.
+     */
+    public function href(const string& $raw) : string
+    {
+        string $dest = str::trim($raw);
+        if ($dest->starts('api:')) {
+            return $this->api($dest->sub(4, $dest->size() - 4)) ?? '';
+        }
+        if ($dest->empty() || $dest->starts('#') || Links::external($dest) || $dest->starts('mailto:') || $dest->starts('tel:')) {
+            return $dest;
+        }
+
+        string $path = $dest->clone();
+        string $hash = '';
+        usize $at = $dest->find('#');
+        if ($at < $dest->size()) {
+            $path = $dest->sub(0, $at);
+            $hash = $dest->sub($at, $dest->size() - $at);
+        }
+        string $query = '';
+        usize $q = $path->find('?');
+        if ($q < $path->size()) {
+            $query = $path->sub($q, $path->size() - $q);
+            $path = $path->sub(0, $q);
+        }
+
+        string $tail = "{$query}{$hash}";
+
+        // an API page's links are site paths already
+        if ($this->page->starts('/')) {
+            return "{$this->url($path)}{$tail}";
+        }
+
+        string $resolved = '';
+        if ($path->starts('/')) {
+            $resolved = Path::normalize($path->sub(1, $path->size() - 1));
+        } else {
+            $resolved = Path::normalize(Path::join(Path::dir($this->page), $path));
+        }
+
+        if ($path->ends('.md')) {
+            if ($this->pages->has($resolved)) {
+                return "{$this->url($this->pages->get($resolved))}{$tail}";
+            }
+            $this->warn("dead link '{$dest}'");
+            return "{$this->url(Route::forPage($resolved))}{$tail}";
+        }
+
+        // a page named without its extension, `./intro` or `/guide/intro`
+        if (Path::ext($resolved)->empty() && $path->ends('/') == false) {
+            string $md = "{$resolved}.md";
+            if ($this->pages->has($md)) {
+                return "{$this->url($this->pages->get($md))}{$tail}";
+            }
+            string $index = Path::join($resolved, 'index.md');
+            if ($this->pages->has($index)) {
+                return "{$this->url($this->pages->get($index))}{$tail}";
+            }
+        }
+
+        if ($path->ends('/')) {
+            string $index = Path::join($resolved, 'index.md');
+            if ($resolved == '.') {
+                $index = 'index.md';
+            }
+            if ($this->pages->has($index)) {
+                return "{$this->url($this->pages->get($index))}{$tail}";
+            }
+            if ($path->starts('/')) {
+                return "{$this->url($path)}{$tail}";
+            }
+        }
+
+        if ($resolved == '.') {
+            return "{$this->url('/')}{$tail}";
+        }
+        string $rooted = "/{$resolved}";
+        return "{$this->url($rooted)}{$tail}";
+    }
+
+    /**
+     * Inline code, linked when autolinking is on and the text names a symbol.
+     */
+    public function code(const string& $content) : string
+    {
+        string $escaped = Html::escape($content);
+        if ($this->autolink == false || $content->contains(' ')) {
+            return "<code>{$escaped}</code>";
+        }
+        string $q = guard $this->resolveQualified($content) else {
+            return "<code>{$escaped}</code>";
+        };
+        string $url = Html::escape($this->url($this->symbols->get($q)));
+        return "<a class=\"sym\" href=\"{$url}\"><code>{$escaped}</code></a>";
+    }
+
+    /**
+     * Autolinking is stricter than `api:`: the code must name the symbol
+     * with its namespace, or name a member of the current scope.
+     */
+    private const function resolveQualified(const string& $content) : string?
+    {
+        string $t = $content->clone();
+        if ($t->ends('()')) {
+            $t = $t->sub(0, $t->size() - 2);
+        }
+        if ($t->contains('::') == false && $this->scope->empty()) {
+            return null;
+        }
+        if ($this->symbols->has($t)) {
+            return $t;
+        }
+        if ($this->scope->empty() == false) {
+            string $member = "{$this->scope}::{$t}";
+            if ($this->symbols->has($member)) {
+                return $member;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Whether `$dest` leaves the site: `http://`, `https://`, or a protocol-relative `//`.
+     */
+    public static function external(const string& $dest) : bool
+    {
+        return $dest->starts('http://') || $dest->starts('https://') || $dest->starts('//');
+    }
+
+    /**
+     * The name after the last `::`, `or` for `result::or`, or the whole name when it has no `::`.
+     */
+    public static function lastSegment(const string& $qualified) : string
+    {
+        usize $at = $qualified->size();
+        while ($at > 1) {
+            if ($qualified->byte($at - 1) == 58 && $qualified->byte($at - 2) == 58) {
+                return $qualified->sub($at, $qualified->size() - $at);
+            }
+            $at = $at - 1;
+        }
+        return $qualified->clone();
+    }
+
+    /**
+     * `a::b` for `a::b::c`, empty for a name with no namespace.
+     */
+    public static function parent(const string& $qualified) : string
+    {
+        string $last = Links::lastSegment($qualified);
+        if ($last->size() == $qualified->size()) {
+            return '';
+        }
+        return $qualified->sub(0, $qualified->size() - $last->size() - 2);
+    }
+}

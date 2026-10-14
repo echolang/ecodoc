@@ -1,0 +1,85 @@
+/*
+ * Tokenizing shell sessions for the highlighter.
+ */
+
+namespace ecodoc::hl;
+
+use ecodoc::text::Ascii;
+use ecodoc::text::ch;
+
+/**
+ * Shell commands as docs show them: a command word, flags, strings, variables and comments.
+ */
+public struct ShellLexer
+{
+    /**
+     * Lex `$src` as shell into `$out`. The first word of each command is a
+     * function, a leading `$ ` prompt is punctuation, so `$ ecodoc build`
+     * reads the way a terminal shows it.
+     */
+    public static function run(const string& $src, Spans& $out) : void
+    {
+        usize $n = $src->size();
+        usize $i = 0;
+        bool $command = true;
+        while ($i < $n) {
+            uint8 $b = $src->byte($i);
+            if ($b == ch::LF) {
+                $out->add('', "\n");
+                $command = true;
+                $i = $i + 1;
+                continue;
+            }
+            if (Ascii::space($b)) {
+                $out->add('', $src->sub($i, 1));
+                $i = $i + 1;
+                continue;
+            }
+            if ($b == ch::HASH && ($i == 0 || Ascii::space($src->byte($i - 1)))) {
+                usize $end = EchoLexer::lineEnd($src, $i);
+                $out->add('c', $src->sub($i, $end - $i));
+                $i = $end;
+                continue;
+            }
+            if ($b == ch::APOS || $b == ch::QUOTE) {
+                usize $end = EchoLexer::stringEnd($src, $i, $b);
+                $out->add('s', $src->sub($i, $end - $i));
+                $i = $end;
+                $command = false;
+                continue;
+            }
+            if ($b == ch::DOLLAR && $command && $i + 1 < $n && $src->byte($i + 1) == ch::SPACE) {
+                $out->add('p', '$');
+                $i = $i + 1;
+                continue;
+            }
+            if ($b == ch::PIPE || $b == ch::SEMI || $b == ch::AMP) {
+                usize $end = $i;
+                while ($end < $n && ($src->byte($end) == ch::PIPE || $src->byte($end) == ch::SEMI || $src->byte($end) == ch::AMP)) {
+                    $end = $end + 1;
+                }
+                $out->add('p', $src->sub($i, $end - $i));
+                $i = $end;
+                $command = true;
+                continue;
+            }
+            usize $end = $i;
+            while ($end < $n && Ascii::space($src->byte($end)) == false && $src->byte($end) != ch::PIPE
+                && $src->byte($end) != ch::SEMI && $src->byte($end) != ch::QUOTE && $src->byte($end) != ch::APOS) {
+                $end = $end + 1;
+            }
+            string $word = $src->sub($i, $end - $i);
+            if ($command && $word->contains('=') == false) {
+                $out->add('f', $word);
+                $command = false;
+            } else if ($word->starts('-')) {
+                $out->add('k', $word);
+            } else if ($word->starts('$')) {
+                $out->add('v', $word);
+            } else {
+                $out->add('', $word);
+            }
+            $i = $end;
+        }
+    }
+}

@@ -1,0 +1,306 @@
+/*
+ * The bytes the Markdown and code readers look at, by name. Markdown syntax
+ * is ASCII, so the readers work on bytes and leave UTF-8 in text alone.
+ */
+
+namespace ecodoc::text::ch;
+
+/**
+ * Tab, `\t`.
+ */
+public const uint8 TAB = 9;
+
+/**
+ * Line feed, `\n`.
+ */
+public const uint8 LF = 10;
+
+/**
+ * Carriage return, `\r`.
+ */
+public const uint8 CR = 13;
+
+/**
+ * Space.
+ */
+public const uint8 SPACE = 32;
+
+/**
+ * `!`.
+ */
+public const uint8 BANG = 33;
+
+/**
+ * `"`.
+ */
+public const uint8 QUOTE = 34;
+
+/**
+ * `#`.
+ */
+public const uint8 HASH = 35;
+
+/**
+ * `$`.
+ */
+public const uint8 DOLLAR = 36;
+
+/**
+ * `%`.
+ */
+public const uint8 PERCENT = 37;
+
+/**
+ * `&`.
+ */
+public const uint8 AMP = 38;
+
+/**
+ * `'`.
+ */
+public const uint8 APOS = 39;
+
+/**
+ * `(`.
+ */
+public const uint8 LPAREN = 40;
+
+/**
+ * `)`.
+ */
+public const uint8 RPAREN = 41;
+
+/**
+ * `*`.
+ */
+public const uint8 STAR = 42;
+
+/**
+ * `+`.
+ */
+public const uint8 PLUS = 43;
+
+/**
+ * `,`.
+ */
+public const uint8 COMMA = 44;
+
+/**
+ * `-`.
+ */
+public const uint8 DASH = 45;
+
+/**
+ * `.`.
+ */
+public const uint8 DOT = 46;
+
+/**
+ * `/`.
+ */
+public const uint8 SLASH = 47;
+
+/**
+ * `0`.
+ */
+public const uint8 ZERO = 48;
+
+/**
+ * `9`.
+ */
+public const uint8 NINE = 57;
+
+/**
+ * `:`.
+ */
+public const uint8 COLON = 58;
+
+/**
+ * `;`.
+ */
+public const uint8 SEMI = 59;
+
+/**
+ * `<`.
+ */
+public const uint8 LT = 60;
+
+/**
+ * `=`.
+ */
+public const uint8 EQ = 61;
+
+/**
+ * `>`.
+ */
+public const uint8 GT = 62;
+
+/**
+ * `?`.
+ */
+public const uint8 QUESTION = 63;
+
+/**
+ * `@`.
+ */
+public const uint8 AT = 64;
+
+/**
+ * `A`.
+ */
+public const uint8 UPPER_A = 65;
+
+/**
+ * `Z`.
+ */
+public const uint8 UPPER_Z = 90;
+
+/**
+ * `[`.
+ */
+public const uint8 LBRACKET = 91;
+
+/**
+ * `\`.
+ */
+public const uint8 BACKSLASH = 92;
+
+/**
+ * `]`.
+ */
+public const uint8 RBRACKET = 93;
+
+/**
+ * `^`.
+ */
+public const uint8 CARET = 94;
+
+/**
+ * `_`.
+ */
+public const uint8 UNDERSCORE = 95;
+
+/**
+ * Backtick.
+ */
+public const uint8 BACKTICK = 96;
+
+/**
+ * `a`.
+ */
+public const uint8 LOWER_A = 97;
+
+/**
+ * `z`.
+ */
+public const uint8 LOWER_Z = 122;
+
+/**
+ * `{`.
+ */
+public const uint8 LBRACE = 123;
+
+/**
+ * `|`.
+ */
+public const uint8 PIPE = 124;
+
+/**
+ * `}`.
+ */
+public const uint8 RBRACE = 125;
+
+/**
+ * `~`.
+ */
+public const uint8 TILDE = 126;
+
+namespace ecodoc::text;
+
+use ecodoc::text::ch;
+
+/**
+ * Byte classes. ASCII only: a byte above 127 is part of a UTF-8 sequence and
+ * counts as a letter, so a word in any script stays one word.
+ *
+ * ```echo
+ * echo Ascii::digit(ch::NINE);   // true
+ * echo Ascii::punct(ch::HASH);   // true
+ * echo Ascii::word(ch::DASH);    // false
+ * echo Ascii::alpha(195);        // true
+ * ```
+ *
+ * That last one is the first byte of `é`. No decoding needed: a slug or a
+ * word boundary only has to know it is not ASCII punctuation.
+ */
+public struct Ascii
+{
+    /**
+     * Whitespace: space, tab, line feed, carriage return and form feed.
+     */
+    public static function space(uint8 $b) : bool
+    {
+        return $b == ch::SPACE || $b == ch::TAB || $b == ch::LF || $b == ch::CR || $b == 12;
+    }
+
+    /**
+     * `0` to `9`.
+     */
+    public static function digit(uint8 $b) : bool
+    {
+        return $b >= ch::ZERO && $b <= ch::NINE;
+    }
+
+    /**
+     * `A` to `Z`.
+     */
+    public static function upper(uint8 $b) : bool
+    {
+        return $b >= ch::UPPER_A && $b <= ch::UPPER_Z;
+    }
+
+    /**
+     * `a` to `z`.
+     */
+    public static function lower(uint8 $b) : bool
+    {
+        return $b >= ch::LOWER_A && $b <= ch::LOWER_Z;
+    }
+
+    /**
+     * A letter, or any byte above 127.
+     */
+    public static function alpha(uint8 $b) : bool
+    {
+        return Ascii::upper($b) || Ascii::lower($b) || $b >= 128;
+    }
+
+    /**
+     * What an identifier is made of: a letter, a digit or `_`.
+     */
+    public static function word(uint8 $b) : bool
+    {
+        return Ascii::alpha($b) || Ascii::digit($b) || $b == ch::UNDERSCORE;
+    }
+
+    /**
+     * ASCII punctuation as CommonMark counts it: every printable byte that is
+     * neither a letter, a digit nor a space.
+     */
+    public static function punct(uint8 $b) : bool
+    {
+        return ($b >= 33 && $b <= 47) || ($b >= 58 && $b <= 64) || ($b >= 91 && $b <= 96) || ($b >= 123 && $b <= 126);
+    }
+
+    /**
+     * `$b` lowercased when it is `A` to `Z`, as it is otherwise. UTF-8 bytes
+     * pass through, so this is a byte fold for slugs and keywords, not a Unicode lowercase.
+     */
+    public static function lowerByte(uint8 $b) : uint8
+    {
+        if (Ascii::upper($b)) {
+            return $b + 32;
+        }
+        return $b;
+    }
+}

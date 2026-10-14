@@ -1,0 +1,108 @@
+namespace ecodoc::site;
+
+use ecodoc::config::{Field, Sidebar, SidebarItem, Site};
+
+/**
+ * A page's previous and next.
+ */
+public struct Neighbours
+{
+    /**
+     * The page before. Empty on the first page.
+     */
+    public PagerLink $prev = PagerLink();
+
+    /**
+     * The page after. Empty on the last page.
+     */
+    public PagerLink $next = PagerLink();
+}
+
+/**
+ * Previous and next: the neighbours of a page in its sidebar's reading
+ * order, unless its frontmatter says otherwise.
+ *
+ * The sidebar already is the reading order, so I follow it rather than ask
+ * for a second list. A page that wants out says so in its frontmatter:
+ *
+ * ```yaml
+ * prev: false
+ * next:
+ *   text: The manifest
+ *   link: /guide/manifest
+ * ```
+ */
+public struct Pager
+{
+    /**
+     * The neighbours of the page at `$url`.
+     *
+     * The sidebar whose base matches `$url` is the reading order. Frontmatter
+     * `prev` and `next` override it: `false` drops the link, a string
+     * renames it, `{ text, link }` replaces it. A page that is not in its
+     * sidebar gets neither, unless the frontmatter supplies them.
+     *
+     * @param $site The sidebar whose base matches `$url` is the reading order.
+     * @param $url The page's URL without the site base, as `Route::forPage` makes it.
+     * @param $front `prev` and `next` override the sidebar: `false` drops the link, a string renames it, `{ text, link }` replaces it.
+     * @return Both links, either one empty when there is no neighbour. A page that is not in its sidebar gets neither.
+     */
+    public static function of(const Site& $site, const string& $url, const json::Value& $front) : Neighbours
+    {
+        Neighbours $v = Neighbours();
+        Sidebar $side = guard $site->sidebarFor($url) else {
+            Pager::override($front, 'prev', $v->prev);
+            Pager::override($front, 'next', $v->next);
+            return $v;
+        };
+        array<SidebarItem> $links = $side->links();
+        usize $at = $links->count();
+        for (usize $i = 0; $i < $links->count(); $i++) {
+            if ($links[$i]->link == $url) {
+                $at = $i;
+                break;
+            }
+        }
+        if ($at < $links->count()) {
+            if ($at > 0) {
+                $v->prev = PagerLink($links[$at - 1]->text, $links[$at - 1]->link);
+            }
+            if ($at + 1 < $links->count()) {
+                $v->next = PagerLink($links[$at + 1]->text, $links[$at + 1]->link);
+            }
+        }
+        Pager::override($front, 'prev', $v->prev);
+        Pager::override($front, 'next', $v->next);
+        return $v;
+    }
+
+    /**
+     * Apply `prev:` or `next:` from the frontmatter: `false`, a title, or `{ text, link }`.
+     */
+    private static function override(const json::Value& $front, const string& $key, PagerLink& $link) : void
+    {
+        json::Value $v = guard $front->get($key) else {
+            return;
+        };
+        if ($v->isBool()) {
+            if (($v->asBool() ?? true) == false) {
+                $link = PagerLink();
+            }
+            return;
+        }
+        if ($v->isStr()) {
+            $link->text = $v->asStr() ?? '';
+            return;
+        }
+        if ($v->isObject()) {
+            string $text = Field::text($v, 'text');
+            string $to = Field::text($v, 'link');
+            if ($text->empty() == false) {
+                $link->text = $text;
+            }
+            if ($to->empty() == false) {
+                $link->link = Route::link($to);
+            }
+        }
+    }
+}

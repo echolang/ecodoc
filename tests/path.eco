@@ -1,0 +1,22 @@
+use ecodoc::sys::Path;
+
+#[group: "path"]
+test normalize_resolves_dots
+{
+    assert(Path::normalize('/a/b/../c/./d/') == '/a/c/d/');
+    assert(Path::normalize('a//b') == 'a/b');
+    assert(Path::normalize('../x') == '../x');
+    assert(Path::normalize('/../x') == '/x');
+}
+
+#[group: "path"]
+test names
+{
+    assert(Path::stem('guide/intro.md') == 'intro');
+    assert(Path::ext('guide/intro.md') == '.md');
+    assert(Path::dir('guide/intro.md') == 'guide');
+    assert(Path::dir('intro.md') == '.');
+    assert(Path::base('a/b/c.eco') == 'c.eco');
+    assert(Path::join('a/', 'b') == 'a/b');
+    assert(Path::join('a', '/b') == '/b');
+}

@@ -1,0 +1,115 @@
+/*
+ * The top nav and the sidebars, as `#[docs::nav:]` and `#[docs::sidebar:]` describe them.
+ */
+
+namespace ecodoc::config;
+
+use ecodoc::site::Route;
+
+/**
+ * A link in the top bar.
+ */
+public struct NavLink
+{
+    /**
+     * The label shown in the top bar.
+     */
+    public string $text;
+
+    /**
+     * Where it goes: a site path like `/guide/`, or a full URL.
+     */
+    public string $link;
+
+    /**
+     * The path prefix that marks this link current: `/guide/` for a link to
+     * `/guide/intro`. Defaults to the link itself.
+     */
+    public string $prefix;
+}
+
+/**
+ * One entry of a sidebar: a link, a group of entries, or both.
+ */
+public class SidebarItem
+{
+    /**
+     * The label, or the group title when the item has `$items`.
+     */
+    public string $text = '';
+
+    /**
+     * Where it goes. Empty for a group that is only a title.
+     */
+    public string $link = '';
+
+    /**
+     * Start a group folded. The reader can open it, and the group holding
+     * the current page always starts open.
+     */
+    public bool $collapsed = false;
+
+    /**
+     * The entries below this one. A manifest sidebar is groups of links, one
+     * level deep; the API sidebar nests a group per namespace.
+     */
+    public array<SidebarItem> $items = array<SidebarItem>();
+
+    /**
+     * Markup hint for API entries: `type`, `ns`, or empty.
+     */
+    public string $kind = '';
+
+    /**
+     * An item from one `{ text, link, collapsed, items }` record of
+     * `#[docs::sidebar:]`, its children included.
+     */
+    public static function read(const json::Value& $v) : SidebarItem
+    {
+        SidebarItem $item = SidebarItem();
+        $item->text = Field::text($v, 'text');
+        $item->link = Route::link(Field::text($v, 'link'));
+        $item->collapsed = Field::flag($v, 'collapsed', false);
+        foreach (Field::items($v, 'items') as $child) {
+            $item->items->push(SidebarItem::read($child));
+        }
+        return $item;
+    }
+}
+
+/**
+ * The sidebar for every page under `$base`.
+ */
+public class Sidebar
+{
+    /**
+     * The URL prefix this sidebar is for, `/guide/`. The longest matching
+     * base wins, so `/` is the fallback for everything else.
+     */
+    public string $base = '/';
+
+    /**
+     * The groups, top to bottom.
+     */
+    public array<SidebarItem> $items = array<SidebarItem>();
+
+    /**
+     * Every link in reading order, which is the order prev and next walk.
+     */
+    public const function links() : array<SidebarItem>
+    {
+        array<SidebarItem> $out = array<SidebarItem>();
+        Sidebar::flatten($this->items, $out);
+        return $out;
+    }
+
+    private static function flatten(const array<SidebarItem>& $items, array<SidebarItem>& $out) : void
+    {
+        foreach ($items as $item) {
+            if ($item->link->empty() == false) {
+                $out->push($item);
+            }
+            Sidebar::flatten($item->items, $out);
+        }
+    }
+}

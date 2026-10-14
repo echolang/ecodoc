@@ -1,0 +1,169 @@
+namespace ecodoc::site;
+
+use ecodoc::md::Heading;
+
+/**
+ * A member under a section of the outline.
+ */
+public struct TocItem
+{
+    /**
+     * The anchor it jumps to, without the `#`.
+     */
+    public string $id;
+
+    /**
+     * What the outline shows.
+     */
+    public string $label;
+
+    /**
+     * The kind letter in front of a member: `s` static, `c` const, `m`
+     * method, `f` function, `k` case or constant. Empty for a heading.
+     */
+    public string $kind;
+}
+
+/**
+ * A top-level entry of the outline, and what folds under it.
+ */
+public struct TocGroup
+{
+    /**
+     * The anchor it jumps to, without the `#`.
+     */
+    public string $id;
+
+    /**
+     * What the outline shows.
+     */
+    public string $label;
+
+    /**
+     * The entries folded under it. Often none.
+     */
+    public array<TocItem> $items = array<TocItem>();
+}
+
+/**
+ * The previous or next page.
+ */
+public struct PagerLink
+{
+    /**
+     * The page title the pager shows.
+     */
+    public string $text = '';
+
+    /**
+     * The page's URL, without the site base. Empty means no link.
+     */
+    public string $link = '';
+
+    /**
+     * Whether there is no page to link to. Text without a link counts as none.
+     */
+    public const function empty() : bool
+    {
+        return $this->link->empty();
+    }
+}
+
+/**
+ * What one page of the site shows, whatever produced it. Markdown pages and
+ * API pages both end as a `PageView`, and `Layout` draws every one of them with the same chrome.
+ *
+ * ```echo
+ * PageView $v = PageView();
+ * $v->url = '/changelog/';
+ * $v->title = 'Changelog';
+ * $v->main = '<article class="doc"><h1>Changelog</h1></article>';
+ * $v->outline = false;
+ * string $html = Layout::render($site, $links, $v);
+ * ```
+ *
+ * This is the seam between "what is on the page" and "what the page looks
+ * like". I made anything that can fill these properties a page, so the API
+ * reference, the redirect for a site without `index.md` and the 404 page
+ * all get the same header, search and theme toggle for free.
+ */
+public class PageView
+{
+    /**
+     * The page title, in `<title>` and the header. The site title follows it.
+     */
+    public string $title = '';
+
+    /**
+     * The `<meta name="description">`. Empty to leave it out.
+     */
+    public string $description = '';
+
+    /**
+     * Where the page is served, without the site base: `/guide/` or `/404.html`.
+     */
+    public string $url = '';
+
+    /**
+     * Which chrome the page gets: `.doc`, `.home` or `.page`.
+     */
+    public PageLayout $layout = .doc;
+
+    /**
+     * The subtitle under the site name in the header.
+     */
+    public string $section = 'Documentation';
+
+    /**
+     * The page body, already HTML. `Layout` wraps it in the chrome.
+     */
+    public string $main = '';
+
+    /**
+     * The "On this page" outline.
+     */
+    public array<TocGroup> $toc = array<TocGroup>();
+
+    /**
+     * Whether the sidebar is drawn.
+     */
+    public bool $sidebar = true;
+
+    /**
+     * Whether the outline column is drawn. Without one, the content gets the room.
+     */
+    public bool $outline = true;
+
+    /**
+     * The "Edit this page" URL. Empty for no link.
+     */
+    public string $edit = '';
+
+    /**
+     * The pager's previous page.
+     */
+    public PagerLink $prev = PagerLink();
+
+    /**
+     * The pager's next page.
+     */
+    public PagerLink $next = PagerLink();
+
+    /**
+     * The outline of a Markdown page: each `##` a group, the `###` under it its items.
+     */
+    public static function outlineOf(const array<Heading>& $headings) : array<TocGroup>
+    {
+        array<TocGroup> $groups = array<TocGroup>();
+        foreach ($headings as $h) {
+            if ($h->level == 2 || ($h->level == 3 && $groups->empty())) {
+                $groups->push(TocGroup($h->id, $h->text));
+                continue;
+            }
+            if ($h->level == 3) {
+                $groups->at($groups->count() - 1)->items->push(TocItem($h->id, $h->text, ''));
+            }
+        }
+        return $groups;
+    }
+}

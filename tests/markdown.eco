@@ -1,0 +1,85 @@
+use ecodoc::md::{Document, Renderer};
+use ecodoc::site::Links;
+
+function md(string $src) : string
+{
+    Links $links = Links();
+    $links->page = 'guide/test.md';
+    Renderer $r = Renderer($links);
+    return $r->document(Document::parse($src, 1));
+}
+
+#[group: "markdown"]
+test paragraphs_and_emphasis
+{
+    string $html = md('Hello *world* and **strong** and ***both*** and ~~gone~~.');
+    echo $html;
+    assert($html == "<p>Hello <em>world</em> and <strong>strong</strong> and <em><strong>both</strong></em> and <del>gone</del>.</p>\n");
+}
+
+#[group: "markdown"]
+test intraword_underscore_is_text
+{
+    string $html = md('snake_case_name and _em_');
+    echo $html;
+    assert($html == "<p>snake_case_name and <em>em</em></p>\n");
+}
+
+#[group: "markdown"]
+test headings_get_slugs
+{
+    string $html = md("# Title\n\n## Getting started\n\n## Getting started\n\n### Custom {#mine}");
+    echo $html;
+    assert($html->contains('<h2 id="getting-started"'));
+    assert($html->contains('<h2 id="getting-started-1"'));
+    assert($html->contains('<h3 id="mine"'));
+}
+
+#[group: "markdown"]
+test code_spans_and_links
+{
+    string $html = md('Use `guard` and [the guide](./intro.md#top) or <https://echoc.dev>.');
+    echo $html;
+    assert($html->contains('<code>guard</code>'));
+    assert($html->contains('href="/guide/intro/#top"'));
+    assert($html->contains('href="https://echoc.dev"'));
+}
+
+#[group: "markdown"]
+test lists_tight_and_nested
+{
+    string $html = md("- one\n- two\n  - inner\n- three\n\n1. a\n2. b");
+    echo $html;
+    assert($html->contains("<ul>\n<li>one</li>"));
+    assert($html->contains("<li>two<ul>\n<li>inner</li>"));
+    assert($html->contains('<ol>'));
+}
+
+#[group: "markdown"]
+test fences_and_containers
+{
+    string $html = md("::: tip Heads up\nInside **here**.\n:::\n\n```echo\necho 1 + 1;  // 2\n```\n\n> [!WARNING]\n> Careful.");
+    echo $html;
+    assert($html->contains('<div class="callout tip">'));
+    assert($html->contains('Heads up'));
+    assert($html->contains('<output><span class="out-mark">›</span>2</output>'));
+    assert($html->contains('<div class="callout warning">'));
+}
+
+#[group: "markdown"]
+test tables
+{
+    string $html = md("| a | b |\n|:--|--:|\n| `x|y` | 2 |");
+    echo $html;
+    assert($html->contains('<th style="text-align: left">a</th>'));
+    assert($html->contains('<td style="text-align: right">2</td>'));
+}
+
+#[group: "markdown"]
+test html_and_escapes
+{
+    string $html = md("<div class=\"x\">\nraw\n</div>\n\n1 < 2 & \\*not em\\*");
+    echo $html;
+    assert($html->contains("<div class=\"x\">\nraw\n</div>"));
+    assert($html->contains('1 &lt; 2 &amp; *not em*'));
+}

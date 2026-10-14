@@ -1,0 +1,134 @@
+namespace ecodoc::cli;
+
+use std::io;
+use ecodoc::sys::{Path, Sys};
+use ecodoc::text::Percent;
+
+/**
+ * `ecodoc serve`: the site as it will be deployed. Built like `ecodoc build`,
+ * so the manifest's base path holds, then served as plain files: no watcher,
+ * no reload script. A site under `/repo/` answers there, and `/` points at it.
+ *
+ * The file half is shared with `ecodoc dev`, which asks for it live.
+ */
+public struct Serve
+{
+    /**
+     * Serve the output of a finished build until the process is stopped.
+     *
+     * @param $b A builder whose `build()` already ran. `target()` is what gets served, `site->base` is where.
+     * @param $port Listens on `127.0.0.1` only.
+     * @return Only on a failure, like a port that is taken. A running server does not return.
+     */
+    public static function run(const Builder& $b, int32 $port) : status<Failure>
+    {
+        string $out = $b->target();
+        string $base = $b->site->base->clone();
+
+        http::Server $app = http::Server();
+        $app->get('/{path*}', function(http::Request $req) : http::Response {
+            string $path = Serve::requested($req->param('path') ?? '');
+            string? $inside = Serve::relative($base, $path);
+            if ($inside == null) {
+                if ($path == '/' || "{$path}/" == $base) {
+                    return Serve::redirect($base);
+                }
+                return Serve::missing($out, false);
+            }
+            return Serve::file($out, $inside ?? '', false);
+        });
+
+        io::println("ecodoc: serving http://localhost:{$port}{$base} (ctrl-c stops)");
+        guard $app->listen('127.0.0.1', $port) else ($e) {
+            return .error(.input("could not listen on port {$port}: {$e}"));
+        };
+        return .ok;
+    }
+
+    /**
+     * The captured route param as a rooted request path, `/guide/` from `guide/` or `/guide/`.
+     */
+    public static function requested(const string& $param) : string
+    {
+        if ($param->starts('/')) {
+            return $param->clone();
+        }
+        return "/{$param}";
+    }
+
+    /**
+     * Where `$path` lives inside the output when the site is served under
+     * `$base` (in the form `/name/`). Nothing when `$path` is outside it.
+     */
+    public static function relative(const string& $base, const string& $path) : string?
+    {
+        if ($path->starts($base) == false) {
+            return null;
+        }
+        return $path->sub($base->size(), $path->size() - $base->size());
+    }
+
+    /**
+     * A `302` redirect to `$to`.
+     */
+    public static function redirect(const string& $to) : http::Response
+    {
+        http::Response $r = http::Response(302, '');
+        $r->header('Location', $to);
+        return $r;
+    }
+
+    /**
+     * One file of the output. Directories answer with their `index.html`, a
+     * missing file with `404.html`. Live, for `ecodoc dev`, pages get the
+     * reload script and nothing is cached.
+     */
+    public static function file(const string& $root, const string& $requested, bool $live) : http::Response
+    {
+        string $rel = Percent::decode($requested);
+        if ($rel->contains('..')) {
+            return http::Response::notFound();
+        }
+        string $path = Path::join($root, $rel);
+        if ($rel->empty() || Sys::isDir($path)) {
+            $path = Path::join($path, 'index.html');
+        }
+        if (Sys::isFile($path) == false) {
+            return Serve::missing($root, $live);
+        }
+        if ($path->ends('.html')) {
+            string $html = guard io::readfile($path) else {
+                return http::Response::notFound();
+            };
+            if ($live) {
+                $html = Dev::inject($html);
+            }
+            http::Response $page = http::Response(html: $html);
+            if ($live) {
+                $page->header('Cache-Control', 'no-store');
+            }
+            return $page;
+        }
+        http::Response $file = http::Response(file: $path);
+        if ($live) {
+            $file->header('Cache-Control', 'no-store');
+        }
+        return $file;
+    }
+
+    /**
+     * The site's own 404 page, or a bare `404` when it has none.
+     */
+    public static function missing(const string& $root, bool $live) : http::Response
+    {
+        string $html = guard io::readfile(Path::join($root, '404.html')) else {
+            return http::Response::notFound();
+        };
+        if ($live) {
+            $html = Dev::inject($html);
+        }
+        http::Response $nf = http::Response(html: $html);
+        $nf->status = 404;
+        return $nf;
+    }
+}

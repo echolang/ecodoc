@@ -1,0 +1,94 @@
+namespace ecodoc::site;
+
+/**
+ * The search index the spotlight dialog reads: one JSON file of short
+ * entries, written next to the pages.
+ *
+ * ```echo
+ * SearchIndex $s = SearchIndex();
+ * $s->add('/guide/cli/', 'Command line', 'Running', 'page', 'page', 'build, dev, serve', '');
+ * $s->json();
+ * // {"v":1,"entries":[{"u":"/guide/cli/","t":"Command line","p":"Running","g":"page","k":"page","s":"build, dev, serve"}]}
+ * ```
+ *
+ * No server, no search service. The dialog fetches `search-index.json` once
+ * and filters it in the browser. I kept the keys to one letter because this
+ * file is downloaded on the first `cmd-K`, and a few thousand entries times `"summary"` adds up.
+ */
+public class SearchIndex
+{
+    /**
+     * The entries so far, as a JSON array.
+     */
+    public json::Value $entries = json::arr();
+
+    /**
+     * Add one entry.
+     *
+     * @param $url The URL the result opens, base and anchor included.
+     * @param $title A page title, a heading, a member name.
+     * @param $parent Context after the title: the page of a heading, the type of a member. Empty for none.
+     * @param $group `member`, `module`, `page` or `section`.
+     * @param $kind The chip: `page`, `section`, `type`, `module`, or `ApiMember::chip()` for a member.
+     * @param $summary One line under the title, cut to about 160 bytes.
+     * @param $words Extra text that matches but is never shown, cut to about 400 bytes.
+     */
+    public function add(
+        const string& $url,
+        const string& $title,
+        const string& $parent,
+        const string& $group,
+        const string& $kind,
+        const string& $summary,
+        const string& $words
+    ) : void
+    {
+        json::Value $e = json::object();
+        $e['u'] = $url->clone();
+        $e['t'] = $title->clone();
+        if ($parent->empty() == false) {
+            $e['p'] = $parent->clone();
+        }
+        $e['g'] = $group->clone();
+        $e['k'] = $kind->clone();
+        if ($summary->empty() == false) {
+            $e['s'] = SearchIndex::clip($summary, 160);
+        }
+        if ($words->empty() == false) {
+            $e['w'] = SearchIndex::clip($words, 400);
+        }
+        $this->entries[] = $e;
+    }
+
+    /**
+     * The whole index as compact JSON: `{"v":1,"entries":[...]}`.
+     */
+    public const function json() : string
+    {
+        json::Value $root = json::object();
+        $root['v'] = json::int(1);
+        $root['entries'] = $this->entries;
+        return json::dump($root);
+    }
+
+    /**
+     * `$text` cut to about `$max` bytes, at a space, never inside a UTF-8 sequence.
+     */
+    public static function clip(const string& $text, usize $max) : string
+    {
+        if ($text->size() <= $max) {
+            return $text->clone();
+        }
+        usize $end = $max;
+        while ($end > 0 && $text->byte($end) != 32) {
+            $end = $end - 1;
+        }
+        if ($end == 0) {
+            $end = $max;
+            while ($end > 0 && $text->byte($end) >= 128 && $text->byte($end) < 192) {
+                $end = $end - 1;
+            }
+        }
+        return "{$text->sub(0, $end)}…";
+    }
+}

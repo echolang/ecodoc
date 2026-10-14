@@ -1,0 +1,142 @@
+namespace ecodoc::site;
+
+use ecodoc::config::{Field, Site};
+use ecodoc::text::Html;
+
+/**
+ * The wave: the Echo mark's arcs as a radial ripple behind a hero. Both
+ * pages with a hero draw it: a home page and an API type page.
+ */
+public struct Wave
+{
+    /**
+     * The wave as inline SVG. Its colors come from CSS variables, so one string serves both themes.
+     */
+    public static function svg() : string
+    {
+        return '<svg class="wave" width="680" height="760" viewBox="0 0 680 760" fill="none" aria-hidden="true"><defs><radialGradient id="echoWave" cx="150" cy="380" r="400" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#008efc" stop-opacity="0"></stop><stop offset=".05" stop-color="#008efc" stop-opacity="0"></stop><stop offset=".154" stop-color="#008efc" stop-opacity=".85"></stop><stop offset=".16" stop-color="#66bbfd" stop-opacity="1"></stop><stop offset=".172" style="stop-color: var(--wave-shade)" stop-opacity=".5"></stop><stop offset=".21" style="stop-color: var(--wave-shade)" stop-opacity="0"></stop><stop offset=".21" stop-color="#008efc" stop-opacity="0"></stop><stop offset=".314" stop-color="#008efc" stop-opacity=".68"></stop><stop offset=".32" stop-color="#66bbfd" stop-opacity=".8"></stop><stop offset=".332" style="stop-color: var(--wave-shade)" stop-opacity=".4"></stop><stop offset=".37" style="stop-color: var(--wave-shade)" stop-opacity="0"></stop><stop offset=".37" stop-color="#008efc" stop-opacity="0"></stop><stop offset=".474" stop-color="#008efc" stop-opacity=".51"></stop><stop offset=".48" stop-color="#66bbfd" stop-opacity=".6"></stop><stop offset=".492" style="stop-color: var(--wave-shade)" stop-opacity=".3"></stop><stop offset=".53" style="stop-color: var(--wave-shade)" stop-opacity="0"></stop><stop offset=".53" stop-color="#008efc" stop-opacity="0"></stop><stop offset=".634" stop-color="#008efc" stop-opacity=".36"></stop><stop offset=".64" stop-color="#66bbfd" stop-opacity=".42"></stop><stop offset=".652" style="stop-color: var(--wave-shade)" stop-opacity=".2"></stop><stop offset=".69" style="stop-color: var(--wave-shade)" stop-opacity="0"></stop><stop offset=".69" stop-color="#008efc" stop-opacity="0"></stop><stop offset=".794" stop-color="#008efc" stop-opacity=".22"></stop><stop offset=".8" stop-color="#66bbfd" stop-opacity=".26"></stop><stop offset=".812" style="stop-color: var(--wave-shade)" stop-opacity=".12"></stop><stop offset=".85" style="stop-color: var(--wave-shade)" stop-opacity="0"></stop><stop offset=".85" stop-color="#008efc" stop-opacity="0"></stop><stop offset=".954" stop-color="#008efc" stop-opacity=".1"></stop><stop offset=".96" stop-color="#66bbfd" stop-opacity=".12"></stop><stop offset=".972" style="stop-color: var(--wave-shade)" stop-opacity="0"></stop><stop offset="1" style="stop-color: var(--wave-shade)" stop-opacity="0"></stop></radialGradient><filter id="echoSoft" filterUnits="userSpaceOnUse" x="-200" y="-200" width="1100" height="1160"><feGaussianBlur stdDeviation="22"></feGaussianBlur></filter><mask id="echoMask" maskUnits="userSpaceOnUse" x="-200" y="-200" width="1100" height="1160"><path d="M 150 380 L 372.6 23.8 A 420 420 0 0 1 372.6 736.2 Z" fill="#ffffff" filter="url(#echoSoft)"></path></mask></defs><circle cx="150" cy="380" r="400" fill="url(#echoWave)" mask="url(#echoMask)"></circle><g mask="url(#echoMask)"><circle class="ripple" cx="150" cy="380" r="400" fill="none" stroke="#66bbfd" stroke-width="2" vector-effect="non-scaling-stroke"></circle><circle class="ripple r2" cx="150" cy="380" r="400" fill="none" stroke="#66bbfd" stroke-width="2" vector-effect="non-scaling-stroke"></circle></g><circle cx="150" cy="380" r="12" fill="#008efc"></circle></svg>';
+    }
+}
+
+/**
+ * The landing page layout: `layout: home` in a page's frontmatter.
+ *
+ * A home page is mostly frontmatter. The hero and the feature cards are
+ * data, not Markdown, because they are drawn as components. Anything written
+ * below the frontmatter comes after them as an ordinary article.
+ */
+public struct Home
+{
+    /**
+     * The hero and feature cards from the frontmatter, then the page's own content.
+     *
+     * ```yaml
+     * hero:
+     *   name: libjson
+     *   text: JSON for Echo
+     *   tagline: Parse, poke, dump.
+     *   actions:
+     *     - { theme: brand, text: Get started, link: /guide/ }
+     * features:
+     *   - { title: No C, details: Pure Echo. }
+     * ```
+     *
+     * `hero.name` falls back to the site title and `hero.tagline` to the
+     * site description, so a bare `layout: home` still has a hero. Action
+     * and feature links go through `$links` under the site base. The result
+     * is the page's `main` HTML, without the chrome.
+     *
+     * @param $page A rendered page with `layout: home`.
+     * @param $links Resolves the action and feature links against the site base.
+     * @param $site Fallbacks for `hero.name` (site title) and `hero.tagline` (site description).
+     * @return The page's `main` HTML, without the chrome.
+     */
+    public static function render(const Page& $page, Links $links, const Site& $site) : string
+    {
+        string $out = '';
+        json::Value $hero = Field::get($page->front, 'hero');
+        string $name = Field::text($hero, 'name');
+        if ($name->empty()) {
+            $name = $site->title->clone();
+        }
+        string $text = Field::text($hero, 'text');
+        string $tagline = Field::text($hero, 'tagline');
+        if ($tagline->empty()) {
+            $tagline = $site->description->clone();
+        }
+
+        $out->append('<section class="home-hero">');
+        $out->append(Wave::svg());
+        $out->append('<h1>');
+        Html::escapeInto($name, $out);
+        if ($text->empty() == false) {
+            $out->append('<span class="home-text">');
+            Html::escapeInto($text, $out);
+            $out->append('</span>');
+        }
+        $out->append('</h1>');
+        if ($tagline->empty() == false) {
+            $out->append('<p class="tagline">');
+            Html::escapeInto($tagline, $out);
+            $out->append('</p>');
+        }
+        array<json::Value> $actions = Field::items($hero, 'actions');
+        if ($actions->empty() == false) {
+            $out->append('<div class="actions">');
+            foreach ($actions as $a) {
+                string $cls = 'btn';
+                if (Field::text($a, 'theme') == 'brand') {
+                    $cls = 'btn brand';
+                }
+                string $href = Html::escape(Home::href($links, Field::text($a, 'link')));
+                string $label = Html::escape(Field::text($a, 'text'));
+                $out->append("<a class=\"{$cls}\" href=\"{$href}\">{$label}</a>");
+            }
+            $out->append('</div>');
+        }
+        $out->append("</section>\n");
+
+        array<json::Value> $features = Field::items($page->front, 'features');
+        if ($features->empty() == false) {
+            $out->append('<div class="features">');
+            foreach ($features as $f) {
+                string $link = Field::text($f, 'link');
+                if ($link->empty()) {
+                    $out->append('<div class="feature">');
+                } else {
+                    string $href = Html::escape(Home::href($links, $link));
+                    $out->append("<a class=\"feature\" href=\"{$href}\">");
+                }
+                string $icon = Field::text($f, 'icon');
+                if ($icon->empty() == false) {
+                    $out->append('<span class="feature-icon" aria-hidden="true">');
+                    Html::escapeInto($icon, $out);
+                    $out->append('</span>');
+                }
+                $out->append('<span class="feature-title">');
+                Html::escapeInto(Field::text($f, 'title'), $out);
+                $out->append('</span><span class="feature-details">');
+                Html::escapeInto(Field::text($f, 'details'), $out);
+                $out->append('</span>');
+                if ($link->empty()) {
+                    $out->append('</div>');
+                } else {
+                    $out->append('</a>');
+                }
+            }
+            $out->append("</div>\n");
+        }
+
+        if ($page->html->empty() == false) {
+            $out->append('<article class="doc">');
+            $out->append($page->html);
+            $out->append("</article>\n");
+        }
+        return $out;
+    }
+
+    private static function href(Links $links, const string& $link) : string
+    {
+        return $links->url(Route::link($link));
+    }
+}

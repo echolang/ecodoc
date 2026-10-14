@@ -1,0 +1,429 @@
+/*
+ * The `---` block at the top of a page, as a libjson value. The rest of
+ * ecodoc then reads frontmatter and manifest values the same way.
+ */
+
+namespace ecodoc::md;
+
+use ecodoc::text::{Ascii, Lines};
+use ecodoc::text::ch;
+
+/**
+ * A page split at its frontmatter.
+ */
+public struct FrontSplit
+{
+    /**
+     * The frontmatter, always a JSON object. Empty when there is none.
+     */
+    public json::Value $data;
+
+    /**
+     * Everything after the closing `---`.
+     */
+    public string $body;
+
+    /**
+     * The line the body starts on, 1-based.
+     */
+    public int32 $line;
+}
+
+/**
+ * Finds the `---` block at the top of a page and hands its lines to `Yaml`.
+ *
+ * ```echo
+ * string $md = "---\ntitle: Go\n---\n# Go";
+ * FrontSplit $s = Frontmatter::split($md);
+ * echo Field::text($s->data, 'title');  // Go
+ * echo $s->body;                        // # Go
+ * echo $s->line;                        // 4
+ * ```
+ */
+public struct Frontmatter
+{
+    /**
+     * `$text` split into its frontmatter and its body.
+     *
+     * The opening `---` must be the very first line. Anything else, an
+     * unclosed block included, means no frontmatter and the whole text is
+     * the body. A page that renders its YAML as a paragraph is easier to
+     * spot than one that silently loses its first heading.
+     */
+    public static function split(const string& $text) : FrontSplit
+    {
+        if ($text->starts("---\n") == false && $text->starts("---\r\n") == false) {
+            return FrontSplit(json::object(), $text->clone(), 1);
+        }
+        array<string> $lines = Lines::split($text);
+        usize $end = 1;
+        while ($end < $lines->count() && str::rtrim($lines[$end]) != '---') {
+            $end = $end + 1;
+        }
+        if ($end >= $lines->count()) {
+            return FrontSplit(json::object(), $text->clone(), 1);
+        }
+        array<string> $yaml = array<string>();
+        for (usize $k = 1; $k < $end; $k++) {
+            $yaml->push($lines[$k]);
+        }
+        array<string> $rest = array<string>();
+        for (usize $k = $end + 1; $k < $lines->count(); $k++) {
+            $rest->push($lines[$k]);
+        }
+        json::Value $data = Yaml::parse($yaml);
+        if ($data->isObject() == false) {
+            $data = json::object();
+        }
+        return FrontSplit($data, str::join($rest, "\n"), ($end as int32) + 2);
+    }
+}
+
+/**
+ * The YAML subset pages use: scalars, `[a, b]` lists, block lists and maps
+ * nested by indentation, and `|` / `>` block strings. Out comes a libjson value.
+ *
+ * I skipped a full YAML parser. Frontmatter is ten lines of `key: value`,
+ * and anchors, tags and merge keys are a project of their own. This covers
+ * every frontmatter key ecodoc reads. Anything fancier belongs in the page, not above it.
+ */
+public struct Yaml
+{
+    /**
+     * The lines between the `---` markers, as a JSON value. Blank lines and
+     * `#` comments are dropped first.
+     */
+    public static function parse(const array<string>& $lines) : json::Value
+    {
+        array<string> $kept = array<string>();
+        foreach ($lines as $l) {
+            string $t = str::trim($l);
+            if ($t->empty() || $t->starts('#')) {
+                continue;
+            }
+            $kept->push(str::rtrim($l));
+        }
+        if ($kept->empty()) {
+            return json::object();
+        }
+        return Yaml::block($kept, 0);
+    }
+
+    /**
+     * The value the lines at the shallowest indentation of `$lines` spell.
+     * A list when they start with `- `, otherwise a map.
+     */
+    private static function block(const array<string>& $lines, int32 $depth) : json::Value
+    {
+        if ($depth > 16 || $lines->empty()) {
+            return json::nil();
+        }
+        usize $indent = Lines::indent($lines[0]);
+        string $first = $lines[0]->sub($indent, $lines[0]->size() - $indent);
+        if ($first->starts('- ') || $first == '-') {
+            return Yaml::list($lines, $indent, $depth);
+        }
+        return Yaml::map($lines, $indent, $depth);
+    }
+
+    private static function list(const array<string>& $lines, usize $indent, int32 $depth) : json::Value
+    {
+        json::Value $out = json::arr();
+        usize $i = 0;
+        while ($i < $lines->count()) {
+            string $l = $lines[$i];
+            if (Lines::indent($l) != $indent) {
+                $i = $i + 1;
+                continue;
+            }
+            string $t = $l->sub($indent, $l->size() - $indent);
+            if ($t->starts('-') == false) {
+                break;
+            }
+            string $item = str::trim($t->sub(1, $t->size() - 1));
+            // the item's own lines: its first, re-indented past the dash, and every deeper one
+            array<string> $own = array<string>();
+            if ($item->empty() == false) {
+                string $pad = str::repeat(' ', $indent + 2);
+                $own->push("{$pad}{$item}");
+            }
+            usize $j = $i + 1;
+            while ($j < $lines->count() && Lines::indent($lines[$j]) > $indent) {
+                $own->push($lines[$j]);
+                $j = $j + 1;
+            }
+            if ($own->empty()) {
+                $out[] = json::nil();
+            } else if ($own->count() == 1 && Yaml::keyAt($item) >= $item->size()) {
+                $out[] = Yaml::scalar($item);
+            } else {
+                $out[] = Yaml::block($own, $depth + 1);
+            }
+            $i = $j;
+        }
+        return $out;
+    }
+
+    private static function map(const array<string>& $lines, usize $indent, int32 $depth) : json::Value
+    {
+        json::Value $out = json::object();
+        usize $i = 0;
+        while ($i < $lines->count()) {
+            string $l = $lines[$i];
+            if (Lines::indent($l) != $indent) {
+                $i = $i + 1;
+                continue;
+            }
+            string $t = $l->sub($indent, $l->size() - $indent);
+            usize $colon = Yaml::keyAt($t);
+            if ($colon >= $t->size()) {
+                $i = $i + 1;
+                continue;
+            }
+            string $key = Yaml::unquote(str::trim($t->sub(0, $colon)));
+            string $rest = str::trim($t->sub($colon + 1, $t->size() - $colon - 1));
+
+            array<string> $deeper = array<string>();
+            usize $j = $i + 1;
+            while ($j < $lines->count() && Lines::indent($lines[$j]) > $indent) {
+                $deeper->push($lines[$j]);
+                $j = $j + 1;
+            }
+            // a list may sit at the key's own indentation, as YAML allows
+            while ($rest->empty() && $j < $lines->count() && Lines::indent($lines[$j]) == $indent) {
+                string $jt = $lines[$j]->sub($indent, $lines[$j]->size() - $indent);
+                if ($jt->starts('- ') == false) {
+                    break;
+                }
+                $deeper->push($lines[$j]);
+                $j = $j + 1;
+                while ($j < $lines->count() && Lines::indent($lines[$j]) > $indent) {
+                    $deeper->push($lines[$j]);
+                    $j = $j + 1;
+                }
+            }
+
+            if ($rest == '|' || $rest == '>' || $rest == '|-' || $rest == '>-') {
+                array<string> $text = array<string>();
+                usize $inner = $indent + 2;
+                if ($deeper->empty() == false) {
+                    $inner = Lines::indent($deeper[0]);
+                }
+                foreach ($deeper as $d) {
+                    $text->push(Lines::dedent($d, $inner));
+                }
+                string $sep = "\n";
+                if ($rest->starts('>')) {
+                    $sep = ' ';
+                }
+                $out[$key] = str::join($text, $sep);
+            } else if ($rest->empty()) {
+                $out[$key] = Yaml::block($deeper, $depth + 1);
+            } else {
+                $out[$key] = Yaml::scalar($rest);
+            }
+            $i = $j;
+        }
+        return $out;
+    }
+
+    /**
+     * Where the `: ` that ends a key sits in `$t`, outside quotes. The size
+     * of `$t` when the line holds no key.
+     */
+    private static function keyAt(const string& $t) : usize
+    {
+        uint8 $quote = 0;
+        for (usize $k = 0; $k < $t->size(); $k++) {
+            uint8 $b = $t->byte($k);
+            if ($quote != 0) {
+                if ($b == $quote) {
+                    $quote = 0;
+                }
+                continue;
+            }
+            if ($k == 0 && ($b == ch::QUOTE || $b == ch::APOS)) {
+                $quote = $b;
+                continue;
+            }
+            if ($b == ch::LBRACKET || $b == ch::LBRACE) {
+                return $t->size();
+            }
+            if ($b == ch::COLON && ($k + 1 == $t->size() || $t->byte($k + 1) == ch::SPACE)) {
+                return $k;
+            }
+        }
+        return $t->size();
+    }
+
+    /**
+     * One value written on a single line.
+     *
+     * ```echo
+     * Yaml::scalar('Getting started');   // "Getting started"
+     * Yaml::scalar('42');                // 42
+     * Yaml::scalar('yes');               // true
+     * Yaml::scalar('~');                 // null
+     * Yaml::scalar('[a, 1, "b, c"]');    // ["a",1,"b, c"]
+     * Yaml::scalar('{ text: Go, link: /guide/ }');  // {"text":"Go","link":"/guide/"}
+     * Yaml::scalar('intro # draft');     // "intro"
+     * ```
+     *
+     * `yes` and `no` are booleans, as YAML 1.1 has them. Quote them when you
+     * mean the word: `'no'` is the string.
+     */
+    public static function scalar(const string& $raw) : json::Value
+    {
+        string $t = Yaml::uncomment(str::trim($raw));
+        if ($t->starts('[') && $t->ends(']')) {
+            json::Value $list = json::arr();
+            string $inner = $t->sub(1, $t->size() - 2);
+            if (str::trim($inner)->empty()) {
+                return $list;
+            }
+            foreach (Yaml::commas($inner) as $part) {
+                $list[] = Yaml::scalar($part);
+            }
+            return $list;
+        }
+        if ($t->starts('{') && $t->ends('}')) {
+            json::Value $obj = json::object();
+            foreach (Yaml::commas($t->sub(1, $t->size() - 2)) as $part) {
+                usize $colon = Yaml::keyAt(str::trim($part));
+                string $p = str::trim($part);
+                if ($colon < $p->size()) {
+                    string $k = Yaml::unquote(str::trim($p->sub(0, $colon)));
+                    $obj[$k] = Yaml::scalar($p->sub($colon + 1, $p->size() - $colon - 1));
+                }
+            }
+            return $obj;
+        }
+        if ($t->starts('"') || $t->starts("'")) {
+            return json::str(Yaml::unquote($t));
+        }
+        if ($t == 'true' || $t == 'yes') {
+            return json::bool(true);
+        }
+        if ($t == 'false' || $t == 'no') {
+            return json::bool(false);
+        }
+        if ($t == 'null' || $t == '~' || $t->empty()) {
+            return json::nil();
+        }
+        if (Yaml::integer($t)) {
+            return json::int(str::int($t) ?? 0);
+        }
+        return json::str($t);
+    }
+
+    private static function integer(const string& $t) : bool
+    {
+        if ($t->empty() || $t->size() > 18) {
+            return false;
+        }
+        for (usize $k = 0; $k < $t->size(); $k++) {
+            uint8 $b = $t->byte($k);
+            if (Ascii::digit($b) == false && ($k > 0 || $b != ch::DASH)) {
+                return false;
+            }
+        }
+        return $t != '-';
+    }
+
+    /**
+     * Drop a ` # comment` from an unquoted scalar.
+     */
+    private static function uncomment(const string& $t) : string
+    {
+        if ($t->starts('"') || $t->starts("'")) {
+            return $t->clone();
+        }
+        usize $at = $t->find(' #');
+        if ($at < $t->size()) {
+            return str::rtrim($t->sub(0, $at));
+        }
+        return $t->clone();
+    }
+
+    /**
+     * `$t` without its quotes. Double quotes understand `\n`, `\t` and a
+     * backslash before any other byte. Single quotes only know `''` for a
+     * quote. Unquoted text comes back as it is.
+     */
+    public static function unquote(const string& $t) : string
+    {
+        if ($t->size() >= 2 && $t->starts('"') && $t->ends('"')) {
+            string $inner = $t->sub(1, $t->size() - 2);
+            string $out = '';
+            usize $k = 0;
+            while ($k < $inner->size()) {
+                uint8 $b = $inner->byte($k);
+                if ($b == ch::BACKSLASH && $k + 1 < $inner->size()) {
+                    uint8 $e = $inner->byte($k + 1);
+                    if ($e == 110) {
+                        $out->push(ch::LF);
+                    } else if ($e == 116) {
+                        $out->push(ch::TAB);
+                    } else {
+                        $out->push($e);
+                    }
+                    $k = $k + 2;
+                    continue;
+                }
+                $out->push($b);
+                $k = $k + 1;
+            }
+            return $out;
+        }
+        if ($t->size() >= 2 && $t->starts("'") && $t->ends("'")) {
+            string $inner = $t->sub(1, $t->size() - 2);
+            string $out = '';
+            usize $k = 0;
+            while ($k < $inner->size()) {
+                if ($inner->byte($k) == ch::APOS && $k + 1 < $inner->size() && $inner->byte($k + 1) == ch::APOS) {
+                    $out->push(ch::APOS);
+                    $k = $k + 2;
+                    continue;
+                }
+                $out->push($inner->byte($k));
+                $k = $k + 1;
+            }
+            return $out;
+        }
+        return $t->clone();
+    }
+
+    /**
+     * Split on commas outside quotes and brackets.
+     */
+    private static function commas(const string& $text) : array<string>
+    {
+        array<string> $parts = array<string>();
+        string $cur = '';
+        uint8 $quote = 0;
+        int32 $depth = 0;
+        for (usize $k = 0; $k < $text->size(); $k++) {
+            uint8 $b = $text->byte($k);
+            if ($quote != 0) {
+                if ($b == $quote) {
+                    $quote = 0;
+                }
+            } else if ($b == ch::QUOTE || $b == ch::APOS) {
+                $quote = $b;
+            } else if ($b == ch::LBRACKET || $b == ch::LBRACE) {
+                $depth = $depth + 1;
+            } else if ($b == ch::RBRACKET || $b == ch::RBRACE) {
+                $depth = $depth - 1;
+            } else if ($b == ch::COMMA && $depth == 0) {
+                $parts->push(str::trim($cur));
+                $cur = '';
+                continue;
+            }
+            $cur->push($b);
+        }
+        if (str::trim($cur)->empty() == false) {
+            $parts->push(str::trim($cur));
+        }
+        return $parts;
+    }
+}

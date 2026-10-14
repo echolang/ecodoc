@@ -1,0 +1,140 @@
+namespace ecodoc::site;
+
+use ecodoc::sys::Path;
+
+/**
+ * Where a page lives: the URL a page's source path maps to, and the file in
+ * the output directory that answers that URL. Pages are directories with an
+ * `index.html`, so every URL works on any static host.
+ *
+ * ```echo
+ * echo Route::forPage('index.md');   // /
+ * echo Route::forPage('cli.md');     // /cli/
+ * echo Route::file('/cli/');         // cli/index.html
+ * echo Route::link('cli.md#flags');  // /cli/#flags
+ * echo Route::link('/api');          // /api/
+ * ```
+ *
+ * The trailing slash is the whole trick. `/guide/intro/` is a directory to
+ * every web server ever written, so any static host serves its `index.html`
+ * without a single line of config.
+ */
+public struct Route
+{
+    /**
+     * `index.md` is `/`, `guide/index.md` is `/guide/`, `guide/intro.md` is `/guide/intro/`.
+     */
+    public static function forPage(const string& $rel) : string
+    {
+        string $path = $rel->clone();
+        if ($path->ends('.md')) {
+            $path = $path->sub(0, $path->size() - 3);
+        }
+        if ($path == 'index') {
+            return '/';
+        }
+        if ($path->ends('/index')) {
+            string $dir = $path->sub(0, $path->size() - 6);
+            return "/{$dir}/";
+        }
+        return "/{$path}/";
+    }
+
+    /**
+     * The output file, relative to the output directory, that serves `$url`.
+     */
+    public static function file(const string& $url) : string
+    {
+        string $path = $url->clone();
+        if ($path->starts('/')) {
+            $path = $path->sub(1, $path->size() - 1);
+        }
+        if ($path->empty()) {
+            return 'index.html';
+        }
+        if ($path->ends('/')) {
+            return "{$path}index.html";
+        }
+        if (Path::ext($path)->empty()) {
+            return "{$path}/index.html";
+        }
+        return $path;
+    }
+
+    /**
+     * A link written in the manifest, in the form page URLs take: rooted,
+     * without `.md` or `.html`, and ending in `/` unless it names a file or
+     * carries a hash. External links stay as written.
+     */
+    public static function link(const string& $raw) : string
+    {
+        string $link = str::trim($raw);
+        if ($link->empty() || Links::external($link) || $link->starts('mailto:')) {
+            return $link;
+        }
+        string $hash = '';
+        usize $at = $link->find('#');
+        if ($at < $link->size()) {
+            $hash = $link->sub($at, $link->size() - $at);
+            $link = $link->sub(0, $at);
+        }
+        if ($link->starts('/') == false) {
+            $link = "/{$link}";
+        }
+        if ($link->ends('.md')) {
+            string $page = Route::forPage($link->sub(1, $link->size() - 1));
+            return "{$page}{$hash}";
+        }
+        if ($link->ends('.html')) {
+            $link = $link->sub(0, $link->size() - 5);
+            if ($link->ends('/index')) {
+                $link = $link->sub(0, $link->size() - 5);
+            }
+        }
+        if ($link->ends('/') == false && Path::ext($link)->empty()) {
+            $link->append('/');
+        }
+        return "{$link}{$hash}";
+    }
+
+    /**
+     * The section a nav link marks current: `/guide/` for `/guide/intro/`.
+     */
+    public static function section(const string& $link) : string
+    {
+        if (Links::external($link) || $link == '/') {
+            return $link->clone();
+        }
+        usize $second = $link->find('/', 1);
+        if ($second < $link->size()) {
+            return $link->sub(0, $second + 1);
+        }
+        return $link->clone();
+    }
+
+    /**
+     * A base path in the form `/name/`: leading and trailing slash, always.
+     */
+    public static function base(const string& $raw) : string
+    {
+        string $b = str::trim($raw);
+        if ($b->starts('/') == false) {
+            $b = "/{$b}";
+        }
+        if ($b->ends('/') == false) {
+            $b->append('/');
+        }
+        return $b;
+    }
+
+    /**
+     * `$path` with a leading `/`. External URLs stay as written.
+     */
+    public static function rooted(const string& $path) : string
+    {
+        if ($path->starts('/') || Links::external($path)) {
+            return $path->clone();
+        }
+        return "/{$path}";
+    }
+}

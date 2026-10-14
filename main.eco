@@ -1,0 +1,110 @@
+/**
+ * The `ecodoc` command line: `build`, `dev`, `serve` and `init`.
+ */
+
+use command;
+use std::env;
+use std::io;
+
+command::Command $app = command::Command('ecodoc', '0.1.0', 'documentation sites for Echo libraries');
+
+command::Subcommand $build = $app->command('build', 'write the site to docs/dist', 'Read the manifest and the pages beside it, pull in the library\'s declarations when the manifest asks for an API reference, then write a static site.');
+command::Subcommand $dev = $app->command('dev', 'serve the site and rebuild on save', 'Build once, serve it on --port, rebuild when a page, the manifest or a library source changes, and reload the open pages.');
+command::Subcommand $serve = $app->command('serve', 'build the site and serve it as deployed', 'Build the way build does, base path included, then serve the output on --port. Nothing is watched, pages are served as written: this is the site a deploy would get.');
+command::Subcommand $init = $app->command('init', 'create a docs folder', 'Write docs/docs.eco, a home page and a first guide page. Files that are already there stay as they are.');
+
+command::Arg $docs = $app->arg('docs', 'd', '<dir>', 'docs folder, ./docs by default');
+command::Arg $out = $app->arg('out', 'o', '<dir>', 'output directory, <docs>/dist by default');
+command::Arg $echoc = $app->arg('echoc', '', '<path>', 'the compiler, $ECHOC or echoc on PATH');
+command::Arg $base = $app->arg('base', '', '<path>', 'path to serve under, overriding #[docs::base:]');
+command::Arg $port = $app->arg('port', 'p', '<n>', 'listen port, 3246 for dev and 6423 for serve');
+command::Flag $strict = $app->flag('strict', '', 'fail on a dead link or an unresolved symbol');
+
+$app->accept($out, $build);
+$app->accept($out, $dev);
+$app->accept($base, $build);
+$app->accept($strict, $build);
+$app->accept($port, $dev);
+$app->accept($out, $serve);
+$app->accept($base, $serve);
+$app->accept($strict, $serve);
+$app->accept($port, $serve);
+
+$r = $app->parse(env::argv());
+
+if ($r->error != null) {
+    command::Error $e = $r->error ?? .noCommand;
+    command::CLIContext $err = .from($r->parsed, $app, .stderr);
+    $err->print(command::renderError($e, $app, $r->parsed, $err));
+    env::exit(1);
+}
+
+$parsed = $r->parsed;
+
+if ($parsed->wantsVersion) {
+    io::println(command::renderVersion($app));
+    env::exit(0);
+}
+
+string $subject = $parsed->subject($app);
+
+if ($parsed->wantsHelp || $subject->empty()) {
+    command::CLIContext $help = .from($parsed, $app, .stdout);
+    $help->print(command::renderHelp($app, $parsed, $help));
+    env::exit(0);
+}
+
+ecodoc::Builder $builder = ecodoc::Builder();
+$builder->echoc = string::from(env::var('ECHOC', 'echoc'));
+if ($parsed->stated($echoc)) {
+    $builder->echoc = $parsed->value($echoc);
+}
+if ($parsed->stated($docs)) {
+    $builder->docs = $parsed->value($docs);
+}
+if ($parsed->stated($out)) {
+    $builder->out = $parsed->value($out);
+}
+if ($parsed->stated($base)) {
+    $builder->base = $parsed->value($base);
+}
+$builder->strict = $parsed->stated($strict);
+
+if ($subject == 'init') {
+    guard ecodoc::cli::Scaffold::create($builder->docs) else ($e) {
+        io::eprintln("ecodoc: {$e->message()}");
+        env::exit(1);
+    }
+    io::println("ecodoc: wrote {$builder->docs}/, now run: ecodoc dev");
+    env::exit(0);
+}
+
+int64 $listen = 6423;
+if ($subject == 'dev') {
+    $listen = 3246;
+}
+if ($parsed->stated($port)) {
+    $listen = str::int($parsed->value($port)) ?? $listen;
+}
+
+if ($subject == 'build' || $subject == 'serve') {
+    if ($builder->report('') == false) {
+        env::exit(1);
+    }
+    if ($subject == 'build') {
+        env::exit(0);
+    }
+    guard ecodoc::cli::Serve::run($builder, $listen as int32) else ($e) {
+        io::eprintln("ecodoc: {$e->message()}");
+        env::exit(1);
+    }
+    env::exit(0);
+}
+
+if ($subject == 'dev') {
+    $builder->base = '/';
+    guard ecodoc::cli::Dev::run($builder, $listen as int32) else ($e) {
+        io::eprintln("ecodoc: {$e->message()}");
+        env::exit(1);
+    }
+}

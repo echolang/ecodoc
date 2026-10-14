@@ -1,0 +1,341 @@
+namespace ecodoc;
+
+use std::io;
+use std::time;
+use ecodoc::api::Reference;
+use ecodoc::config::{Field, Sidebar, Site};
+use ecodoc::site::{Asset, Dist, Home, Layout, Links, Neighbours, Page, PageLayout, PageView, Pager, Route, SearchIndex, Theme};
+use ecodoc::sys::{Path, Walk};
+use ecodoc::text::Html;
+
+/**
+ * One build of a docs folder: read the manifest, collect and parse the pages,
+ * read the library's declarations when the manifest asks for an API reference,
+ * resolve every link against all of it, then write the site.
+ *
+ * ```echo
+ * Builder $b = Builder();
+ * $b->docs = 'docs';
+ * $b->strict = true;
+ * guard $b->build() else ($e) {
+ *     io::eprintln($e->message());
+ *     env::exit(1);
+ * }
+ * echo $b->pages;     // 6
+ * echo $b->target();  // docs/dist
+ * ```
+ *
+ * This is the whole of `ecodoc build`. The command line in `main.eco` only
+ * copies its flags onto these properties and prints what comes back. `dev` and
+ * `serve` run the same `build()`, so whatever you preview is byte for byte what
+ * you deploy. A `Builder` is good for one run; `dev` makes a fresh one for every
+ * rebuild, which is cheap and leaves nothing stale from the run before.
+ */
+public class Builder
+{
+    /**
+     * The compiler to run for the manifest and the declarations. `main.eco`
+     * sets it from `--echoc`, then `$ECHOC`, then `echoc` on `PATH`.
+     */
+    public string $echoc = 'echoc';
+
+    /**
+     * The docs folder, the one that holds `docs.eco`.
+     */
+    public string $docs = 'docs';
+
+    /**
+     * Where the site goes. Empty means `<docs>/dist`.
+     */
+    public string $out = '';
+
+    /**
+     * Overrides `#[docs::base:]`, for a preview served from `/`.
+     */
+    public string $base = '';
+
+    /**
+     * Fail the build on a dead link or an unresolved symbol.
+     */
+    public bool $strict = false;
+
+    /**
+     * The site as the manifest described it, with the API sidebar added. Filled by `build()`.
+     */
+    public Site $site = Site();
+
+    /**
+     * Dead links and unresolved symbols, one line each. Filled by `build()`
+     * and printed by the caller, even when the build fails.
+     */
+    public array<string> $warnings = array<string>();
+
+    /**
+     * How many Markdown pages were written. Filled by `build()`.
+     */
+    public usize $pages = 0;
+
+    /**
+     * How many API symbols were documented. `0` without an API reference. Filled by `build()`.
+     */
+    public usize $symbols = 0;
+
+    /**
+     * The output directory this build writes, `$out` or `<docs>/dist`.
+     */
+    public const function target() : string
+    {
+        if ($this->out->empty()) {
+            return Path::join($this->docs, 'dist');
+        }
+        return $this->out->clone();
+    }
+
+    /**
+     * A new builder with this one's options and none of its results, for the next build.
+     */
+    public const function fresh() : Builder
+    {
+        Builder $b = Builder();
+        $b->echoc = $this->echoc->clone();
+        $b->docs = $this->docs->clone();
+        $b->out = $this->out->clone();
+        $b->base = $this->base->clone();
+        $b->strict = $this->strict;
+        return $b;
+    }
+
+    /**
+     * Build, then print the warnings and either a timed summary or the failure.
+     * True when the site was written.
+     *
+     * @param $hint Appended to the failure line, for example what to do about it.
+     */
+    public function report(const string& $hint) : bool
+    {
+        time::instant $start = time::instant::now();
+        status<Failure> $built = $this->build();
+        foreach ($this->warnings as $w) {
+            io::eprintln("warning: {$w}");
+        }
+        if ($built->failed()) {
+            io::eprintln("ecodoc: {$built->failure()->message()}{$hint}");
+            return false;
+        }
+        int64 $ms = $start->elapsed()->as_millis();
+        io::println("ecodoc: {$this->pages} page(s), {$this->symbols} symbol(s) -> {$this->target()} in {$ms} ms");
+        return true;
+    }
+
+    /**
+     * Build the site into `target()`.
+     *
+     * The order matters. The API reference is read first, because its symbols
+     * are what `api:` links in the pages resolve to. Then every page is read
+     * before any is rendered, so a link to a page further down the walk
+     * resolves too. Only then is anything written.
+     *
+     * A build that fails on the manifest, a page, or `--strict` has not touched
+     * the output directory. The old site stays up.
+     *
+     * @return `.ok`, or the first `Failure`. Warnings land in `$warnings` either way.
+     */
+    public function build() : status<Failure>
+    {
+        $this->warnings = array<string>();
+        Site $site = guard Site::load($this->echoc, $this->docs) else ($e) {
+            return .error($e);
+        };
+        if ($this->base->empty() == false) {
+            $site->base = Route::base($this->base);
+        }
+
+        Links $links = Links();
+        $links->base = $site->base;
+        $links->autolink = $site->api->autolink;
+        SearchIndex $search = SearchIndex();
+        array<PageView> $views = array<PageView>();
+
+        // the reference first: its symbols are what `api:` links in pages resolve to
+        if ($site->api->enabled) {
+            Reference $ref = guard Reference::read($this->echoc, $this->docs, $site) else ($e) {
+                return .error($e);
+            };
+            if ($site->title->empty()) {
+                $site->title = $ref->library->clone();
+            }
+            if ($site->version->empty() && $ref->version->empty() == false) {
+                $site->version = "v{$ref->version}";
+            }
+            $ref->register($site, $links);
+            $this->symbols = $ref->symbolCount();
+            $views->extend($ref->views($site, $links, $search));
+            $site->sidebars->push($ref->sidebar($site));
+        }
+        if ($site->title->empty()) {
+            $site->title = Path::base(Path::dir(Path::normalize(Builder::absolute($this->docs))));
+        }
+
+        // pages: every one is known before any is rendered, so links between them resolve
+        array<string> $skip = Walk::ignored();
+        $skip->push('public');
+        $skip->push(Path::base($this->target()));
+        array<Page> $pages = array<Page>();
+        foreach (Walk::files($this->docs, '.md', $skip) as $rel) {
+            Page $p = guard Page::read($this->docs, $rel) else ($e) {
+                return .error($e);
+            };
+            $links->pages[$rel] = $p->url;
+            $pages->push($p);
+        }
+
+        foreach ($pages as $p) {
+            $p->render($links);
+            $views->push($this->view($site, $links, $p, $search));
+        }
+        $this->pages = $pages->count();
+        if ($pages->empty() && $site->api->enabled == false) {
+            return .error(.input("{$this->docs} holds no Markdown pages"));
+        }
+
+        // a site without an index page starts at its first page
+        if ($links->pages->has('index.md') == false && $views->empty() == false) {
+            PageView $first = $views[0];
+            string $target = Html::escape($links->url($first->url));
+            PageView $redirect = PageView();
+            $redirect->url = '/';
+            $redirect->title = $site->title;
+            $redirect->layout = .page;
+            $redirect->sidebar = false;
+            $redirect->outline = false;
+            string $firstTitle = Html::escape($first->title);
+            $redirect->main = "<meta http-equiv=\"refresh\" content=\"0; url={$target}\"><p class=\"empty-note\">Continue to <a href=\"{$target}\">{$firstTitle}</a>.</p>";
+            $views->push($redirect);
+        }
+
+        $this->warnings->extend($links->warnings);
+        if ($this->strict && $this->warnings->empty() == false) {
+            return .error(.input("{$this->warnings->count()} broken link(s); see the warnings above"));
+        }
+
+        Dist $dist = guard Dist::open($this->target()) else ($e) {
+            return .error($e);
+        };
+        foreach ($views as $v) {
+            string $html = Layout::render($site, $links, $v);
+            guard $dist->write(Route::file($v->url), $html) else ($e) {
+                return .error($e);
+            };
+        }
+        guard $dist->write('404.html', Layout::render($site, $links, Builder::notFound($site))) else ($e) {
+            return .error($e);
+        };
+        guard $dist->write('search-index.json', $search->json()) else ($e) {
+            return .error($e);
+        };
+        array<Asset> $assets = guard Theme::assets() else ($e) {
+            return .error($e);
+        };
+        foreach ($assets as $a) {
+            guard $dist->write(Path::join('assets', $a->name), $a->bytes) else ($e) {
+                return .error($e);
+            };
+        }
+
+        // images and other files next to the pages, and public/ at the root
+        guard $dist->copyTree($this->docs, '', $skip) else ($e) {
+            return .error($e);
+        };
+        array<string> $none = array<string>();
+        guard $dist->copyTree(Path::join($this->docs, 'public'), '', $none) else ($e) {
+            return .error($e);
+        };
+
+        $this->site = $site;
+        return .ok;
+    }
+
+    private function view(const Site& $site, Links $links, Page $p, SearchIndex& $search) : PageView
+    {
+        PageView $v = PageView();
+        $v->title = $p->title;
+        $v->description = $p->description;
+        $v->url = $p->url;
+        $v->layout = $p->layout;
+        $v->sidebar = $p->sidebar();
+        $v->outline = $p->outline();
+        $v->toc = PageView::outlineOf($p->headings);
+        if ($v->outline && $v->toc->empty() && $site->edit->empty()) {
+            $v->outline = false;
+        }
+        if ($site->edit->empty() == false && Field::flag($p->front, 'editLink', true)) {
+            $v->edit = str::join(str::split($site->edit, '{path}')->owned(), $p->rel);
+        }
+        Neighbours $n = Pager::of($site, $p->url, $p->front);
+        if ($p->layout == PageLayout::doc) {
+            $v->prev = $n->prev;
+            $v->next = $n->next;
+        }
+
+        if ($p->layout == PageLayout::home) {
+            $v->main = Home::render($p, $links, $site);
+        } else {
+            $v->main = "<article class=\"doc\">{$p->html}</article>\n";
+        }
+
+        // the page, then every section of it
+        string $url = $links->url($p->url);
+        string $where = Builder::section($site, $p->url);
+        $search->add($url, $p->title, $where, 'page', 'page', $p->description, '');
+        foreach ($p->headings as $h) {
+            if ($h->level < 2 || $h->level > 3) {
+                continue;
+            }
+            $search->add("{$url}#{$h->id}", $h->text, $p->title, 'section', 'section', $h->body, '');
+        }
+        return $v;
+    }
+
+    /**
+     * The sidebar group a page is listed under, shown next to it in search results.
+     */
+    private static function section(const Site& $site, const string& $url) : string
+    {
+        Sidebar $side = guard $site->sidebarFor($url) else {
+            return '';
+        };
+        foreach ($side->items as $group) {
+            foreach ($group->items as $item) {
+                if ($item->link == $url) {
+                    return $group->text->clone();
+                }
+            }
+        }
+        return '';
+    }
+
+    private static function notFound(const Site& $site) : PageView
+    {
+        PageView $v = PageView();
+        $v->url = '/404.html';
+        $v->title = 'Page not found';
+        $v->layout = .page;
+        $v->sidebar = false;
+        $v->outline = false;
+        string $home = Html::escape($site->base);
+        $v->main = "<section class=\"home-hero\"><h1>404<span class=\"home-text\">Nothing echoes back from here.</span></h1><p class=\"tagline\">The page moved or never existed. Search with ⌘K, or start over.</p><div class=\"actions\"><a class=\"btn brand\" href=\"{$home}\">Back home</a></div></section>";
+        return $v;
+    }
+
+    /**
+     * `$path` made absolute against the working directory. Already-absolute paths pass through.
+     */
+    public static function absolute(const string& $path) : string
+    {
+        if ($path->starts('/')) {
+            return $path->clone();
+        }
+        string $cwd = std::env::cwd();
+        return Path::normalize(Path::join($cwd, $path));
+    }
+}

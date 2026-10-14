@@ -1,0 +1,57 @@
+/*
+ * Percent-decoding of request paths for the local preview server.
+ */
+
+namespace ecodoc::text;
+
+/**
+ * `%XX` in a request path, turned back into bytes.
+ */
+public struct Percent
+{
+    /**
+     * `$text` with every `%XX` turned back into its byte.
+     *
+     * ```echo
+     * echo Percent::decode('guide/my%20page/');  // guide/my page/
+     * echo Percent::decode('100%');              // 100%
+     * ```
+     *
+     * A `%` without two hex digits after it stays a `%`. A request path is
+     * user input, so a broken escape is kept rather than refused.
+     */
+    public static function decode(const string& $text) : string
+    {
+        string $out = '';
+        usize $i = 0;
+        while ($i < $text->size()) {
+            uint8 $b = $text->byte($i);
+            if ($b == 37 && $i + 2 < $text->size()) {
+                int32 $hi = Percent::hex($text->byte($i + 1));
+                int32 $lo = Percent::hex($text->byte($i + 2));
+                if ($hi >= 0 && $lo >= 0) {
+                    $out->push(($hi * 16 + $lo) as uint8);
+                    $i = $i + 3;
+                    continue;
+                }
+            }
+            $out->push($b);
+            $i = $i + 1;
+        }
+        return $out;
+    }
+
+    private static function hex(uint8 $b) : int32
+    {
+        if ($b >= 48 && $b <= 57) {
+            return ($b - 48) as int32;
+        }
+        if ($b >= 97 && $b <= 102) {
+            return ($b - 87) as int32;
+        }
+        if ($b >= 65 && $b <= 70) {
+            return ($b - 55) as int32;
+        }
+        return -1;
+    }
+}
