@@ -8,12 +8,21 @@ ecodoc is a docs site for that library. You keep a `docs/` folder next to `modul
 
 Every release carries a binary for macOS arm64, Linux x86_64 and Linux arm64. ecodoc calls [`echoc`](https://echoc.dev/guide/installation) for the manifest and the reference, so you need that too.
 
+macOS, Apple Silicon:
+
 ```bash
 curl -fsSL https://github.com/echolang/ecodoc/releases/latest/download/ecodoc-macos-arm64.tar.gz | tar -xz
 sudo mv ecodoc /usr/local/bin/
 ```
 
-Swap in `ecodoc-linux-x86_64` or `ecodoc-linux-arm64` on Linux. Anywhere else, build it. You need `echoc` and `clang`:
+Linux, x86_64:
+
+```bash
+curl -fsSL https://github.com/echolang/ecodoc/releases/latest/download/ecodoc-linux-x86_64.tar.gz | tar -xz
+sudo mv ecodoc /usr/local/bin/
+```
+
+On Linux arm64 the archive is `ecodoc-linux-arm64.tar.gz`. Same two commands. Anywhere else, build it. You need `echoc` and `clang`:
 
 ```bash
 git clone https://github.com/echolang/ecodoc
