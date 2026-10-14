@@ -1,7 +1,5 @@
 /*
- * Documentation sites for Echo libraries. A `docs/` folder (manifest plus
- * Markdown) becomes a static site in `docs/dist/`, with an API reference from
- * the library's own declarations when the manifest asks, and the theme baked into the binary.
+ * ecodoc: a documentation site generator for Echo libraries.
  */
 
 #[module: "ecodoc"]

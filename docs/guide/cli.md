@@ -44,6 +44,69 @@ harbor push docs/dist docs.example.com --delete
 
 When the site lives below the domain root, set `#[docs::base: "/your-lib/"]` so every link carries that path.
 
+## GitHub Pages
+
+ecodoc is also a GitHub Action. It installs Echo and ecodoc, runs `epm install` if the repo has a lock file, builds the site, and hands it to Pages. The deploy itself is GitHub's own action, in a second job, because only a workflow can ask for the permissions it needs.
+
+Drop this in `.github/workflows/docs.yml`:
+
+```yaml
+name: docs
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: echolang/ecodoc@v0
+        with:
+          base: /${{ github.event.repository.name }}/
+          strict: true
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+```
+
+Then, once, in the repository: Settings, Pages, Source: GitHub Actions.
+
+`base` is the part people forget. A project site lives at `https://<owner>.github.io/<repo>/`, so every link needs `/<repo>/` in front. The line above passes the repository's name, so the manifest can stay at `/` for `ecodoc dev`. On a custom domain, drop it.
+
+To check the docs on a pull request without deploying, run the same `build` job with `pages: false`.
+
+| Input | Default | Meaning |
+|:--|:--|:--|
+| `version` | `latest` | The ecodoc release, `v0.1.3` or `latest` |
+| `echo-version` | `latest` | The Echo release, passed to [setup-echo](https://github.com/echolang/setup-echo) |
+| `docs` | `docs` | The docs folder |
+| `out` | `<docs>/dist` | Where the site is written |
+| `base` | the manifest's | Serve under this path |
+| `strict` | `false` | Fail on a dead link or an unresolved symbol |
+| `epm-install` | `true` | Run `epm install` first when there is an `epm.lock.json` |
+| `pages` | `true` | Upload the site as the Pages artifact |
+| `setup-echo` | `true` | Install Echo. Turn it off when an earlier step already did. |
+| `ecodoc` | | A binary to use instead of a release |
+
+The action runs on `ubuntu-24.04`, `ubuntu-24.04-arm` and `macos-15`. Those are the three binaries a release carries. The outputs are `dir`, where the site went, and `version`, the ecodoc that built it.
+
 ## Theme development
 
 The theme (one CSS file and a few ES modules) is compiled into the binary from `theme/`. While working on it, point ecodoc at the directory and skip the rebuild:

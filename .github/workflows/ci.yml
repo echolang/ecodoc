@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # no windows: c/sys.c is fork, pipe and waitpid
+        os: [macos-15, ubuntu-24.04, ubuntu-24.04-arm]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: echolang/setup-echo@v1
+
+      - run: epm install
+
+      - name: Test
+        run: echoc test
+
+      # the release builds exactly this, so a link failure shows up here and not on a tag
+      - name: Build the binary
+        run: |
+          mkdir -p stage
+          echoc build --release --target ecodoc -o stage/ecodoc
+          stage/ecodoc --version

@@ -4,6 +4,17 @@ You wrote an Echo library. Now somebody has to understand it.
 
 ecodoc gives you a docs site for that: Markdown pages you write by hand, plus an API reference read out of the library itself. I didn't want a second parser that would disagree with the compiler in six months. The reference comes from `echoc`, which already knows every declaration, every docblock, and every attribute.
 
+## Install it
+
+Every release carries a binary for macOS arm64, Linux x86_64 and Linux arm64. Pick yours and put it on your `PATH`:
+
+```bash
+curl -fsSL https://github.com/echolang/ecodoc/releases/latest/download/ecodoc-macos-arm64.tar.gz | tar -xz
+sudo mv ecodoc /usr/local/bin/
+```
+
+Swap in `ecodoc-linux-x86_64` or `ecodoc-linux-arm64` on Linux. Anything else builds from source: clone the repo, `epm install`, `echoc build`, and the binary is `ecobuild/ecodoc`.
+
 ## Create a docs folder
 
 Run `init` in the library's root, next to `module.eco`:

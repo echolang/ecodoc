@@ -1,0 +1,110 @@
+name: ecodoc
+description: Build an Echo library's docs site with ecodoc, ready for GitHub Pages
+author: echolang
+
+branding:
+  icon: book-open
+  color: purple
+
+inputs:
+  version:
+    description: ecodoc release tag (v0.1.3 or 0.1.3) or `latest`
+    required: false
+    default: latest
+  ecodoc:
+    description: Path to an ecodoc binary to use instead of downloading a release
+    required: false
+    default: ''
+  setup-echo:
+    description: Install Echo with echolang/setup-echo. The API reference compiles the library, so ecodoc needs echoc.
+    required: false
+    default: 'true'
+  echo-version:
+    description: Echo release tag passed to setup-echo, or `latest`
+    required: false
+    default: latest
+  epm-install:
+    description: Run `epm install` first when the repository has an epm.lock.json, so the API reference can compile the library
+    required: false
+    default: 'true'
+  docs:
+    description: The docs folder
+    required: false
+    default: docs
+  out:
+    description: Where the site is written, `<docs>/dist` by default
+    required: false
+    default: ''
+  base:
+    description: Path the site is served under, overriding `#[docs::base:]`. `/<repo>/` for a project site on GitHub Pages.
+    required: false
+    default: ''
+  strict:
+    description: Fail on a dead link or an unresolved symbol
+    required: false
+    default: 'false'
+  pages:
+    description: Upload the site as the GitHub Pages artifact, for actions/deploy-pages
+    required: false
+    default: 'true'
+
+outputs:
+  dir:
+    description: The directory the site was written to
+    value: ${{ steps.build.outputs.dir }}
+  version:
+    description: The ecodoc version that built it
+    value: ${{ steps.build.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Echo
+      if: inputs.setup-echo == 'true'
+      uses: echolang/setup-echo@v1
+      with:
+        version: ${{ inputs.echo-version }}
+
+    - name: Install ecodoc
+      id: install
+      if: inputs.ecodoc == ''
+      shell: bash
+      env:
+        ECODOC_VERSION: ${{ inputs.version }}
+      run: bash "${{ github.action_path }}/scripts/install-action.sh"
+
+    - name: Install packages
+      if: inputs.epm-install == 'true' && hashFiles('epm.lock.json') != ''
+      shell: bash
+      run: epm install
+
+    - name: Build the docs
+      id: build
+      shell: bash
+      env:
+        ECODOC: ${{ inputs.ecodoc || steps.install.outputs.path }}
+        DOCS: ${{ inputs.docs }}
+        OUT: ${{ inputs.out }}
+        BASE: ${{ inputs.base }}
+        STRICT: ${{ inputs.strict }}
+      run: |
+        set -u
+        out="${OUT:-${DOCS}/dist}"
+        args=(build --docs "${DOCS}" --out "${out}")
+        if [ -n "${BASE}" ]; then
+            args+=(--base "${BASE}")
+        fi
+        if [ "${STRICT}" = "true" ]; then
+            args+=(--strict)
+        fi
+        "${ECODOC}" "${args[@]}"
+        {
+            echo "dir=${out}"
+            echo "version=$("${ECODOC}" --version)"
+        } >> "${GITHUB_OUTPUT}"
+
+    - name: Upload the Pages artifact
+      if: inputs.pages == 'true'
+      uses: actions/upload-pages-artifact@v4
+      with:
+        path: ${{ steps.build.outputs.dir }}

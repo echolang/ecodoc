@@ -1,0 +1,53 @@
+name: docs
+
+# ecodoc's own docs, built by the action in this repo with the ecodoc from this commit. That makes
+# this workflow the action's test as well: a pull request builds the site, master deploys it.
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+# a deploy that is already running finishes, a stale pull request build does not
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: echolang/setup-echo@v1
+
+      - run: epm install
+
+      - name: Build ecodoc
+        run: |
+          mkdir -p "${RUNNER_TEMP}/ecodoc"
+          echoc build --release --target ecodoc -o "${RUNNER_TEMP}/ecodoc/ecodoc"
+
+      - uses: ./
+        with:
+          ecodoc: ${{ runner.temp }}/ecodoc/ecodoc
+          setup-echo: false
+          epm-install: false
+          base: /${{ github.event.repository.name }}/
+          strict: true
+          pages: ${{ github.event_name != 'pull_request' }}
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
