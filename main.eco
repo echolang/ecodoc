@@ -6,7 +6,7 @@ use command;
 use std::env;
 use std::io;
 
-command::Command $app = command::Command('ecodoc', '0.1.1', 'documentation sites for Echo libraries'); // x-release-please-version
+command::Command $app = command::Command('ecodoc', '0.1.2', 'documentation sites for Echo libraries'); // x-release-please-version
 
 command::Subcommand $build = $app->command('build', 'write the site to docs/dist', 'Read the manifest and the pages beside it, pull in the library\'s declarations when the manifest asks for an API reference, then write a static site.');
 command::Subcommand $dev = $app->command('dev', 'serve the site and rebuild on save', 'Build once, serve it on --port, rebuild when a page, the manifest or a library source changes, and reload the open pages.');
